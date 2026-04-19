@@ -1,0 +1,47 @@
+name: required-policy
+
+on:
+  workflow_call:
+    inputs:
+      repository:
+        description: Repository name in owner/name form.
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  policy:
+    name: policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout target repository
+        uses: actions/checkout@v4
+        with:
+          path: target
+
+      - name: Checkout policy repository
+        uses: actions/checkout@v4
+        with:
+          repository: yourbright-jp/ci-policy
+          path: ci-policy
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.3
+
+      - name: Install policy dependencies
+        working-directory: ci-policy
+        run: bun install --frozen-lockfile
+
+      - name: Run policy checks
+        working-directory: ci-policy
+        env:
+          TARGET_REPOSITORY: ${{ inputs.repository || github.repository }}
+        run: bun run check -- --repo "$GITHUB_WORKSPACE/target" --repository "$TARGET_REPOSITORY"
+

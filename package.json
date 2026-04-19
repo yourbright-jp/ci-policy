@@ -1,0 +1,17 @@
+{
+  "name": "@yourbright/ci-policy",
+  "private": true,
+  "type": "module",
+  "packageManager": "bun@1.3.3",
+  "scripts": {
+    "check": "bun run scripts/check-workflows.ts",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "js-yaml": "4.1.0"
+  },
+  "devDependencies": {
+    "@types/js-yaml": "4.0.9"
+  }
+}
+

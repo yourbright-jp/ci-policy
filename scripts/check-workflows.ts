@@ -35,11 +35,11 @@ type CheckResult = {
 const WORKFLOW_DIR = ".github/workflows";
 
 const ALLOWED_USES = [
-  /^actions\/checkout@v4$/,
-  /^actions\/setup-node@v4$/,
+  /^actions\/checkout@v6$/,
+  /^actions\/setup-node@v6$/,
   /^oven-sh\/setup-bun@v2$/,
   /^github\/codeql-action\/[^@\s]+@v\d+$/,
-  /^yourbright-jp\/ci-policy\/\.github\/workflows\/required-policy\.yml@v1$/
+  /^yourbright-jp\/ci-policy\/\.github\/workflows\/required-policy\.yml@v2$/
 ];
 
 const DEPLOY_COMMANDS = [
@@ -356,4 +356,3 @@ if (import.meta.main) {
     process.exit(1);
   }
 }
-

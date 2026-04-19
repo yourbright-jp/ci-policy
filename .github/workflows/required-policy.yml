@@ -20,12 +20,12 @@ jobs:
       contents: read
     steps:
       - name: Checkout target repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           path: target
 
       - name: Checkout policy repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: yourbright-jp/ci-policy
           path: ci-policy
@@ -44,4 +44,3 @@ jobs:
         env:
           TARGET_REPOSITORY: ${{ inputs.repository || github.repository }}
         run: bun run check -- --repo "$GITHUB_WORKSPACE/target" --repository "$TARGET_REPOSITORY"
-

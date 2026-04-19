@@ -22,7 +22,7 @@ jobs:
   policy:
     permissions:
       contents: read
-    uses: yourbright-jp/ci-policy/.github/workflows/required-policy.yml@v1
+    uses: yourbright-jp/ci-policy/.github/workflows/required-policy.yml@v2
     with:
       repository: yourbright-jp/example-repo
 ```

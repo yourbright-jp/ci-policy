@@ -52,7 +52,7 @@ jobs:
   unit:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: oven-sh/setup-bun@v2
       - run: bun install --frozen-lockfile
       - run: bun run test
@@ -149,4 +149,3 @@ jobs:
     expect(result.violations.map((violation) => violation.rule)).toContain("bun-repo-package-lock-forbidden");
   });
 });
-

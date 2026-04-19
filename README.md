@@ -29,6 +29,8 @@ jobs:
 
 GitHub の branch protection / ruleset では、各 repo の `policy / policy` check を required status check にします。
 
+注意: private repo で required status check を強制するには GitHub Team/Pro 以上、または対象 repo の public 化が必要です。GitHub Free の private repo では policy check は実行できますが、merge button の強制ブロックは GitHub 側で有効化できません。
+
 ## ローカル検証
 
 ```bash
@@ -53,4 +55,3 @@ exceptions:
 ## 管理している規約
 
 詳細は [docs/rules.md](docs/rules.md) を参照してください。
-

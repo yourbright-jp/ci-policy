@@ -148,4 +148,30 @@ jobs:
     expect(result.ok).toBe(false);
     expect(result.violations.map((violation) => violation.rule)).toContain("bun-repo-package-lock-forbidden");
   });
+
+  test("loads project-specific exceptions from the target repository", () => {
+    const repo = makeRepo({
+      ".github/ci-policy-exceptions.yaml": `
+exceptions:
+  - repo: yourbright-jp/example
+    rule: workflow-permissions-required
+    path: .github/workflows/test.yml
+    reason: migration window
+    owner: "@yourbright-jp/platform"
+    expires: "2026-05-31"
+`,
+      ".github/workflows/test.yml": `
+name: test
+on:
+  pull_request:
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ok
+`
+    });
+
+    expect(check(repo).ok).toBe(true);
+  });
 });

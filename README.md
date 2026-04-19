@@ -22,7 +22,7 @@ jobs:
   policy:
     permissions:
       contents: read
-    uses: yourbright-jp/ci-policy/.github/workflows/required-policy.yml@v2
+    uses: yourbright-jp/ci-policy/.github/workflows/required-policy.yml@v3
     with:
       repository: yourbright-jp/example-repo
 ```
@@ -40,7 +40,9 @@ bun run check -- --repo /path/to/repo --repository yourbright-jp/example-repo
 
 ## 例外
 
-例外は `policies/exceptions.yaml` に期限付きで追加します。期限切れの例外は無視されます。
+このリポジトリは public です。プロジェクト固有の repo 名、内部 service 名、account ID、build URL、secret 名の利用事情が分かる例外理由をここに置かないでください。
+
+中央の `policies/exceptions.yaml` は public にしてよい global exception だけに限定します。通常のプロジェクト固有例外は、対象 repo 側の `.github/ci-policy-exceptions.yaml` に期限付きで追加します。対象 repo が private なら、その例外内容も private repo 内に留まります。
 
 ```yaml
 exceptions:
@@ -55,3 +57,19 @@ exceptions:
 ## 管理している規約
 
 詳細は [docs/rules.md](docs/rules.md) を参照してください。
+
+## Public Repo Hygiene
+
+この repo に入れてよいもの:
+
+- 組織共通の抽象ルール
+- public にして問題ない action allowlist
+- placeholder の repo 名、例: `yourbright-jp/example-repo`
+
+入れてはいけないもの:
+
+- private project の実 repo 名を伴う例外
+- Cloudflare account ID、Worker service 名、build URL
+- AWS account ID、SSO URL、resource ARN
+- Infisical path、secret value、credential value
+- 顧客名、個別 campaign 名、内部 incident の詳細

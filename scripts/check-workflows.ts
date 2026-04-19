@@ -24,6 +24,7 @@ type CheckOptions = {
   repoRoot: string;
   repository: string;
   exceptionsPath?: string;
+  targetExceptionsPath?: string;
   now?: Date;
 };
 
@@ -39,7 +40,7 @@ const ALLOWED_USES = [
   /^actions\/setup-node@v6$/,
   /^oven-sh\/setup-bun@v2$/,
   /^github\/codeql-action\/[^@\s]+@v\d+$/,
-  /^yourbright-jp\/ci-policy\/\.github\/workflows\/required-policy\.yml@v2$/
+  /^yourbright-jp\/ci-policy\/\.github\/workflows\/required-policy\.yml@v[23]$/
 ];
 
 const DEPLOY_COMMANDS = [
@@ -59,7 +60,10 @@ const SHA_PIN = /@[a-f0-9]{40}$/i;
 export function runPolicyCheck(options: CheckOptions): CheckResult {
   const repoRoot = path.resolve(options.repoRoot);
   const now = options.now ?? new Date();
-  const exceptions = loadExceptions(options.exceptionsPath ?? path.join(process.cwd(), "policies", "exceptions.yaml"));
+  const exceptions = [
+    ...loadExceptions(options.exceptionsPath ?? path.join(process.cwd(), "policies", "exceptions.yaml")),
+    ...loadExceptions(options.targetExceptionsPath ?? path.join(repoRoot, ".github", "ci-policy-exceptions.yaml"))
+  ];
   const violations: Violation[] = [];
 
   const bunRepo = isBunRepo(repoRoot);
@@ -328,6 +332,7 @@ function parseArgs(argv: string[]): CheckOptions {
   let repoRoot = process.cwd();
   let repository = process.env.TARGET_REPOSITORY ?? process.env.GITHUB_REPOSITORY ?? "unknown/unknown";
   let exceptionsPath: string | undefined;
+  let targetExceptionsPath: string | undefined;
 
   for (let index = 0; index < argv.length; index += 1) {
     const value = argv[index];
@@ -337,10 +342,12 @@ function parseArgs(argv: string[]): CheckOptions {
       repository = argv[++index] ?? repository;
     } else if (value === "--exceptions") {
       exceptionsPath = argv[++index];
+    } else if (value === "--target-exceptions") {
+      targetExceptionsPath = argv[++index];
     }
   }
 
-  return { repoRoot, repository, exceptionsPath };
+  return { repoRoot, repository, exceptionsPath, targetExceptionsPath };
 }
 
 if (import.meta.main) {

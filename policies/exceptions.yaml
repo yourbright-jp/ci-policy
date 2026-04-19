@@ -1,2 +1,5 @@
+# This repository is public.
+# Keep this file for public global exceptions only.
+# Put project-specific exceptions in the target repository:
+# .github/ci-policy-exceptions.yaml
 exceptions: []
-

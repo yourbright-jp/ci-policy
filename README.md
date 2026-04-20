@@ -27,9 +27,42 @@ jobs:
       repository: yourbright-jp/example-repo
 ```
 
-GitHub の branch protection / ruleset では、各 repo の `policy / policy` check を required status check にします。
+GitHub の ruleset では、各 repo の `policy / policy` check を required status check にします。
 
 注意: private repo で required status check を強制するには GitHub Team/Pro 以上、または対象 repo の public 化が必要です。GitHub Free の private repo では policy check は実行できますが、merge button の強制ブロックは GitHub 側で有効化できません。
+
+## 標準 ruleset
+
+production branch は repo ruleset 2 本で保護します。classic branch protection は新規 repo では使いません。
+
+### main-integrity-required
+
+CI と履歴保護の土台です。bypass は設定しません。
+
+- Target: default branch
+- Enforcement: active
+- Required pull request: on
+- Required status checks: strict
+  - `policy / policy`
+  - repo 固有の verify check
+  - repo 固有の package manager check
+  - repo 固有の PR policy check
+- Restrict deletions: on
+- Block force pushes: on
+
+### main-review-gate
+
+通常レビューのための gate です。solo admin 運用で詰まらないよう、repository admin は pull request 上だけ bypass 可能にします。
+
+- Target: default branch
+- Enforcement: active
+- Required pull request approvals: 1
+- Require approval of the most recent reviewable push: on
+- Require conversation resolution: on
+- Bypass actor: Repository admin
+- Bypass mode: Pull requests only
+
+この分割により、admin は緊急時に review gate だけ bypass できますが、`main-integrity-required` の PR 経由、required status checks、force push 禁止、branch deletion 禁止は bypass できません。
 
 ## ローカル検証
 

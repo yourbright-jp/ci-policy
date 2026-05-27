@@ -1,6 +1,33 @@
 # YourBright CI Policy
 
-YourBright org の GitHub Actions 規約を reusable workflow として管理するリポジトリです。
+YourBright org の GitHub Actions 規約を reusable workflow として管理するリポジトリです。**Guardrails 層** — 各 repo の CI から `uses:` で呼ばれ、required status check として merge を強制ブロックする。
+
+## 思想 / 設計原則
+
+YourBright の org-wide harness は **2 repo 構成**。それぞれ役割が違い、可視性も違う。
+
+| Repo | レイヤ | 強制度 | visibility | CI から呼ぶ |
+|---|---|---|---|---|
+| [`yourbright-jp/ci-policy`](https://github.com/yourbright-jp/ci-policy) (this) | **Guardrails** (検査と強制) | required check で merge block | **public** | はい (`uses:` で reusable workflow) |
+| [`yourbright-jp/yb-harness`](https://github.com/yourbright-jp/yb-harness) | **Golden Path** (推奨と雛形) | 推奨、各 repo が opt-in | private | **いいえ** (CI から checkout しない) |
+
+### なぜ 2 repo に分けるか
+
+Platform Engineering の業界標準は **「強制が必要なもの (Guardrails)」と「推奨でいいもの (Golden Path)」をレイヤとして分離**することにある。Backstage の software template と OPA policy、Cruft / Copier と CI checks、Renovate centralized preset と required checks、いずれも同じ構造。両者を混在させると、強制側に推奨内容が紛れ込んで運用が硬直化し、推奨側に強制要素が混じって採用率が落ちる。
+
+### なぜ ci-policy は public か
+
+caller (各 repo) の CI は `actions/checkout` で reusable workflow を取得する。**private repo を別 private repo から checkout すると `GITHUB_TOKEN` ではアクセスできず、GitHub App / PAT が必要**になる。Guardrails 層は全 caller から CI runtime に呼ばれるため、認証コストを払わず public で配布するのが業界の標準解。代償として **機密はここに置けない** (下記「例外」と「Public Repo Hygiene」を参照)。
+
+機密性のあるテンプレや社内固有情報は yb-harness (private) 側に置く。
+
+### なぜ強制レイヤをここに置くか
+
+Guardrails の本質は「壊れたものが main に入らない」という merge block の機能。required status check として動かないと意味がない。**強制力を担保するために public で配布 + caller の CI から `uses:` で呼ばれる**、この設計は妥協ではなく機能要件から導かれる。
+
+### 推奨レイヤ (Golden Path) は yb-harness へ
+
+AGENTS.md テンプレ、lefthook.yml、`.mise.toml`、scaffolds、内部ドキュメント、社内固有の規約 — これらは **CI 強制から外し**、各 repo が opt-in で取り込む形にする。配布手段は手動 copy / Cruft / Copier / Renovate preset / 自前 sync action のいずれか。runtime fetch せず **commit して使う**。詳細は [yb-harness の README](https://github.com/yourbright-jp/yb-harness) を参照。
 
 ## 使い方
 

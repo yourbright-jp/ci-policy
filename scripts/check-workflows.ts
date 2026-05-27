@@ -40,7 +40,8 @@ const ALLOWED_USES = [
   /^actions\/setup-node@v6$/,
   /^oven-sh\/setup-bun@v2$/,
   /^github\/codeql-action\/[^@\s]+@v\d+$/,
-  /^yourbright-jp\/ci-policy\/\.github\/workflows\/required-policy\.yml@v[23]$/
+  /^yourbright-jp\/ci-policy\/\.github\/workflows\/required-policy\.yml@v[23]$/,
+  /^yourbright-jp\/ci-policy\/\.github\/workflows\/coverage-policy\.yml@v[23]$/
 ];
 
 const DEPLOY_COMMANDS = [

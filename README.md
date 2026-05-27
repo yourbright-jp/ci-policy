@@ -56,6 +56,29 @@ jobs:
 
 GitHub の ruleset では、各 repo の `policy / policy` check を required status check にします。
 
+### Coverage gate (opt-in)
+
+yb-harness の Golden Path 規約に従って caller の `test:ci` が `coverage/lcov.info` を出力する repo は、coverage 閾値 gate も reusable workflow として呼べます。閾値判定はこの ci-policy 側で持ち、caller 側には threshold を埋め込みません。
+
+```yaml
+jobs:
+  coverage:
+    permissions:
+      contents: read
+    uses: yourbright-jp/ci-policy/.github/workflows/coverage-policy.yml@v3
+    with:
+      repository: yourbright-jp/example-repo
+      # 任意 override (省略時は line 60 / branch 50)
+      line-threshold: 75
+      branch-threshold: 65
+```
+
+lcov 形式さえ揃っていれば parser は runner 非依存に動きます (bun test / vitest / jest / c8 など)。`test:ci` の中身を変えても閾値判定側は影響を受けません。`coverage / coverage` も required status check に追加してください。
+
+#### 閾値の運用方針 (ratchet)
+
+初期値は **line 60% / branch 50%** の「下限 (floor)」として導入し、四半期ごとに 5pt ずつ引き上げて line 80 / branch 70 を目標にします。導入時点で既に閾値を超えている repo は、caller 側で `line-threshold` / `branch-threshold` を高めに上書きし、自分の repo が下がらないように lock-in できます (下げる方向の override は受け付けない運用にしてください — required check の意味が失われるため)。
+
 注意: private repo で required status check を強制するには GitHub Team/Pro 以上、または対象 repo の public 化が必要です。GitHub Free の private repo では policy check は実行できますが、merge button の強制ブロックは GitHub 側で有効化できません。
 
 ## 標準 ruleset

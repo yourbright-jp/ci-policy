@@ -1,0 +1,92 @@
+name: coverage-policy
+
+on:
+  workflow_call:
+    inputs:
+      repository:
+        description: Repository name in owner/name form.
+        required: false
+        type: string
+      test-command:
+        description: Command that runs caller tests and emits coverage/lcov.info (per Golden Path test:ci convention).
+        required: false
+        type: string
+        default: bun run test:ci
+      lcov-path:
+        description: Path to the lcov report, relative to the caller repository root.
+        required: false
+        type: string
+        default: coverage/lcov.info
+      line-threshold:
+        description: |
+          Minimum line coverage percentage. Default 60 is an org-wide ratchet floor:
+          low enough that existing repos do not trip on day one, ratcheted up quarterly
+          toward the target of 80. Override per repo only when you intend to lock in
+          a higher value than the floor.
+        required: false
+        type: number
+        default: 60
+      branch-threshold:
+        description: |
+          Minimum branch coverage percentage. Default 50 is the ratchet floor
+          (target 70). Skipped automatically when the report has no branch records,
+          so it is safe for repos whose runner does not emit branch data.
+        required: false
+        type: number
+        default: 50
+      bun-version:
+        description: Bun version used to install caller deps and execute the test command.
+        required: false
+        type: string
+        default: 1.3.3
+
+permissions:
+  contents: read
+
+jobs:
+  coverage:
+    name: coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout target repository
+        uses: actions/checkout@v6
+        with:
+          path: target
+
+      - name: Checkout policy repository
+        uses: actions/checkout@v6
+        with:
+          repository: yourbright-jp/ci-policy
+          path: ci-policy
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ inputs.bun-version }}
+
+      - name: Install caller dependencies
+        working-directory: target
+        run: bun install --frozen-lockfile
+
+      - name: Install policy dependencies
+        working-directory: ci-policy
+        run: bun install --frozen-lockfile
+
+      - name: Run caller test:ci
+        working-directory: target
+        run: ${{ inputs.test-command }}
+
+      - name: Coverage threshold gate
+        working-directory: ci-policy
+        env:
+          LCOV_PATH: ${{ github.workspace }}/target/${{ inputs.lcov-path }}
+          LINE_THRESHOLD: ${{ inputs.line-threshold }}
+          BRANCH_THRESHOLD: ${{ inputs.branch-threshold }}
+        run: |
+          bun run check:coverage -- \
+            --lcov "$LCOV_PATH" \
+            --line "$LINE_THRESHOLD" \
+            --branch "$BRANCH_THRESHOLD"

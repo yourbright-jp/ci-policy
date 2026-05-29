@@ -38,10 +38,11 @@ const WORKFLOW_DIR = ".github/workflows";
 const ALLOWED_USES = [
   /^actions\/checkout@v6$/,
   /^actions\/setup-node@v6$/,
+  /^actions\/upload-artifact@v[45]$/,
   /^oven-sh\/setup-bun@v2$/,
   /^github\/codeql-action\/[^@\s]+@v\d+$/,
-  /^yourbright-jp\/ci-policy\/\.github\/workflows\/required-policy\.yml@v[23]$/,
-  /^yourbright-jp\/ci-policy\/\.github\/workflows\/coverage-policy\.yml@v[23]$/
+  /^yourbright-jp\/ci-policy\/\.github\/workflows\/required-policy\.yml@v[234]$/,
+  /^yourbright-jp\/ci-policy\/\.github\/workflows\/coverage-policy\.yml@v[234]$/
 ];
 
 const DEPLOY_COMMANDS = [

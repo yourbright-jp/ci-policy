@@ -1,5 +1,11 @@
 # CI Policy Rules
 
+## PR 本文の最低限の記録を必須にする
+
+`pull_request` では `## 概要` と `## テスト` を `policy / policy` job 内で検証します。
+空の本文は bot を含めて失敗し、空でない Dependabot 本文は定型見出しを免除します。
+本文編集時にも再検証するため、caller は `pull_request.types` に `edited` を含めます。
+
 ## GitHub Actions から deploy しない
 
 GitHub Actions は test / lint / build verification までに限定します。deploy は Cloudflare Workers Builds、Vercel、Railway など各 platform 側の GitHub integration に寄せます。
@@ -55,8 +61,8 @@ GitHub Actions workflow から次の token 名を参照することを禁止し�
 - `actions/upload-artifact@v4` / `@v5`
 - `oven-sh/setup-bun@v2`
 - `github/codeql-action/*@v*`
-- `yourbright-jp/ci-policy/.github/workflows/required-policy.yml@v3` / `@v4`
-- `yourbright-jp/ci-policy/.github/workflows/coverage-policy.yml@v3` / `@v4`
+- `yourbright-jp/ci-policy/.github/workflows/required-policy.yml@v3` / `@v4` / `@v5`
+- `yourbright-jp/ci-policy/.github/workflows/coverage-policy.yml@v3` / `@v4` / `@v5`
 
 ## public repo にプロジェクト固有情報を置かない
 

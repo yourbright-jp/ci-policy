@@ -33,7 +33,7 @@ function check(repoRoot: string) {
     repoRoot,
     repository: "yourbright-jp/example",
     exceptionsPath: path.join(repoRoot, "missing-exceptions.yaml"),
-    now: new Date("2026-04-19T00:00:00Z")
+    now: new Date("2026-04-19T00:00:00Z"),
   });
 }
 
@@ -56,7 +56,7 @@ jobs:
       - uses: oven-sh/setup-bun@v2
       - run: bun install --frozen-lockfile
       - run: bun run test
-`
+`,
     });
 
     expect(check(repo).ok).toBe(true);
@@ -85,7 +85,7 @@ jobs:
         with:
           name: artifacts-v5
           path: dist
-`
+`,
     });
 
     expect(check(repo).ok).toBe(true);
@@ -110,15 +110,17 @@ jobs:
         with:
           name: artifacts-v3
           path: dist
-`
+`,
     });
 
     const result = check(repo);
     expect(result.ok).toBe(false);
-    expect(result.violations.map((violation) => violation.rule)).toContain("github-actions-uses-allowlist");
+    expect(result.violations.map((violation) => violation.rule)).toContain(
+      "github-actions-uses-allowlist",
+    );
   });
 
-  test("allows ci-policy reusable workflows at v4", () => {
+  test("allows ci-policy reusable workflows at v4 and v5", () => {
     const repo = makeRepo({
       ".github/workflows/policy.yml": `
 name: policy
@@ -133,10 +135,27 @@ jobs:
     uses: yourbright-jp/ci-policy/.github/workflows/required-policy.yml@v4
     with:
       repository: yourbright-jp/example
-`
+`,
     });
 
     expect(check(repo).ok).toBe(true);
+
+    const v5Repo = makeRepo({
+      ".github/workflows/policy.yml": `
+name: policy
+on:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  policy:
+    permissions:
+      contents: read
+    uses: yourbright-jp/ci-policy/.github/workflows/required-policy.yml@v5
+`,
+    });
+
+    expect(check(v5Repo).ok).toBe(true);
   });
 
   test("blocks deploy commands in GitHub Actions", () => {
@@ -152,12 +171,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - run: bunx wrangler deploy
-`
+`,
     });
 
     const result = check(repo);
     expect(result.ok).toBe(false);
-    expect(result.violations.map((violation) => violation.rule)).toContain("no-deploy-command-in-actions");
+    expect(result.violations.map((violation) => violation.rule)).toContain(
+      "no-deploy-command-in-actions",
+    );
   });
 
   test("blocks npm commands in Bun repos", () => {
@@ -175,12 +196,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - run: npm ci
-`
+`,
     });
 
     const result = check(repo);
     expect(result.ok).toBe(false);
-    expect(result.violations.map((violation) => violation.rule)).toContain("bun-repo-npm-command-forbidden");
+    expect(result.violations.map((violation) => violation.rule)).toContain(
+      "bun-repo-npm-command-forbidden",
+    );
   });
 
   test("requires top-level workflow permissions", () => {
@@ -194,12 +217,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - run: echo ok
-`
+`,
     });
 
     const result = check(repo);
     expect(result.ok).toBe(false);
-    expect(result.violations.map((violation) => violation.rule)).toContain("workflow-permissions-required");
+    expect(result.violations.map((violation) => violation.rule)).toContain(
+      "workflow-permissions-required",
+    );
   });
 
   test("blocks package-lock.json in Bun repos", () => {
@@ -218,12 +243,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - run: bun test
-`
+`,
     });
 
     const result = check(repo);
     expect(result.ok).toBe(false);
-    expect(result.violations.map((violation) => violation.rule)).toContain("bun-repo-package-lock-forbidden");
+    expect(result.violations.map((violation) => violation.rule)).toContain(
+      "bun-repo-package-lock-forbidden",
+    );
   });
 
   test("loads project-specific exceptions from the target repository", () => {
@@ -246,7 +273,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - run: echo ok
-`
+`,
     });
 
     expect(check(repo).ok).toBe(true);

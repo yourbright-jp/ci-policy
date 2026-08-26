@@ -1,6 +1,7 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 import yaml from "js-yaml";
 
 export type Violation = {
@@ -41,8 +42,8 @@ const ALLOWED_USES = [
   /^actions\/upload-artifact@v[45]$/,
   /^oven-sh\/setup-bun@v2$/,
   /^github\/codeql-action\/[^@\s]+@v\d+$/,
-  /^yourbright-jp\/ci-policy\/\.github\/workflows\/required-policy\.yml@v[234]$/,
-  /^yourbright-jp\/ci-policy\/\.github\/workflows\/coverage-policy\.yml@v[234]$/
+  /^yourbright-jp\/ci-policy\/\.github\/workflows\/required-policy\.yml@v[2345]$/,
+  /^yourbright-jp\/ci-policy\/\.github\/workflows\/coverage-policy\.yml@v[2345]$/,
 ];
 
 const DEPLOY_COMMANDS = [
@@ -50,7 +51,7 @@ const DEPLOY_COMMANDS = [
   /\bvercel\s+(?:deploy|--prod)\b/i,
   /\brailway\s+(?:up|deploy)\b/i,
   /\baws\s+cloudformation\s+deploy\b/i,
-  /\baws\s+amplify\s+publish\b/i
+  /\baws\s+amplify\s+publish\b/i,
 ];
 
 const TOKEN_REFERENCES =
@@ -63,8 +64,12 @@ export function runPolicyCheck(options: CheckOptions): CheckResult {
   const repoRoot = path.resolve(options.repoRoot);
   const now = options.now ?? new Date();
   const exceptions = [
-    ...loadExceptions(options.exceptionsPath ?? path.join(process.cwd(), "policies", "exceptions.yaml")),
-    ...loadExceptions(options.targetExceptionsPath ?? path.join(repoRoot, ".github", "ci-policy-exceptions.yaml"))
+    ...loadExceptions(
+      options.exceptionsPath ?? path.join(process.cwd(), "policies", "exceptions.yaml"),
+    ),
+    ...loadExceptions(
+      options.targetExceptionsPath ?? path.join(repoRoot, ".github", "ci-policy-exceptions.yaml"),
+    ),
   ];
   const violations: Violation[] = [];
 
@@ -73,7 +78,7 @@ export function runPolicyCheck(options: CheckOptions): CheckResult {
     violations.push({
       rule: "bun-repo-lockfile-required",
       path: "bun.lock",
-      message: "Bun repo must commit bun.lock."
+      message: "Bun repo must commit bun.lock.",
     });
   }
 
@@ -81,7 +86,7 @@ export function runPolicyCheck(options: CheckOptions): CheckResult {
     violations.push({
       rule: "bun-repo-package-lock-forbidden",
       path: "package-lock.json",
-      message: "Bun repo must not commit package-lock.json."
+      message: "Bun repo must not commit package-lock.json.",
     });
   }
 
@@ -93,7 +98,7 @@ export function runPolicyCheck(options: CheckOptions): CheckResult {
       violations.push({
         rule: "workflow-yaml-invalid",
         path: workflowPath,
-        message: "Workflow YAML must be a mapping."
+        message: "Workflow YAML must be a mapping.",
       });
       continue;
     }
@@ -102,12 +107,12 @@ export function runPolicyCheck(options: CheckOptions): CheckResult {
   }
 
   const activeViolations = violations.filter(
-    (violation) => !isExcepted(violation, exceptions, options.repository, now)
+    (violation) => !isExcepted(violation, exceptions, options.repository, now),
   );
 
   return {
     ok: activeViolations.length === 0,
-    violations: activeViolations
+    violations: activeViolations,
   };
 }
 
@@ -115,19 +120,19 @@ function checkWorkflow(
   workflow: Record<string, unknown>,
   workflowPath: string,
   bunRepo: boolean,
-  violations: Violation[]
+  violations: Violation[],
 ) {
   if (workflow.permissions === undefined) {
     violations.push({
       rule: "workflow-permissions-required",
       path: workflowPath,
-      message: "Workflow must declare top-level permissions."
+      message: "Workflow must declare top-level permissions.",
     });
   } else if (workflow.permissions === "write-all") {
     violations.push({
       rule: "workflow-permissions-write-all-forbidden",
       path: workflowPath,
-      message: "Workflow permissions must not be write-all."
+      message: "Workflow permissions must not be write-all.",
     });
   }
 
@@ -135,7 +140,7 @@ function checkWorkflow(
     violations.push({
       rule: "pull-request-target-forbidden",
       path: workflowPath,
-      message: "pull_request_target is forbidden for org repositories."
+      message: "pull_request_target is forbidden for org repositories.",
     });
   }
 
@@ -189,7 +194,7 @@ function checkUses(uses: string, location: string, violations: Violation[]) {
   violations.push({
     rule: "github-actions-uses-allowlist",
     path: location,
-    message: `uses '${uses}' must be on the allowlist or pinned to a 40-character commit SHA.`
+    message: `uses '${uses}' must be on the allowlist or pinned to a 40-character commit SHA.`,
   });
 }
 
@@ -198,7 +203,7 @@ function checkRun(run: string, location: string, bunRepo: boolean, violations: V
     violations.push({
       rule: "no-deploy-command-in-actions",
       path: location,
-      message: "Deploy commands must not run in GitHub Actions."
+      message: "Deploy commands must not run in GitHub Actions.",
     });
   }
 
@@ -206,7 +211,7 @@ function checkRun(run: string, location: string, bunRepo: boolean, violations: V
     violations.push({
       rule: "no-deploy-token-reference-in-actions",
       path: location,
-      message: "Deploy token references must not appear in GitHub Actions."
+      message: "Deploy token references must not appear in GitHub Actions.",
     });
   }
 
@@ -214,7 +219,7 @@ function checkRun(run: string, location: string, bunRepo: boolean, violations: V
     violations.push({
       rule: "bun-repo-npm-command-forbidden",
       path: location,
-      message: "Bun repos must use bun commands instead of npm commands in workflows."
+      message: "Bun repos must use bun commands instead of npm commands in workflows.",
     });
   }
 }
@@ -246,8 +251,13 @@ function isBunRepo(repoRoot: string): boolean {
   }
 
   try {
-    const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf8")) as { packageManager?: unknown };
-    return typeof packageJson.packageManager === "string" && packageJson.packageManager.startsWith("bun@");
+    const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf8")) as {
+      packageManager?: unknown;
+    };
+    return (
+      typeof packageJson.packageManager === "string" &&
+      packageJson.packageManager.startsWith("bun@")
+    );
   } catch {
     return false;
   }
@@ -283,7 +293,12 @@ function loadExceptions(exceptionsPath: string): ExceptionEntry[] {
   return Array.isArray(exceptions) ? (exceptions as ExceptionEntry[]) : [];
 }
 
-function isExcepted(violation: Violation, exceptions: ExceptionEntry[], repository: string, now: Date): boolean {
+function isExcepted(
+  violation: Violation,
+  exceptions: ExceptionEntry[],
+  repository: string,
+  now: Date,
+): boolean {
   return exceptions.some((entry) => {
     if (!entry || typeof entry !== "object") {
       return false;
@@ -332,7 +347,8 @@ function matchesRepository(value: string | string[] | undefined, repository: str
 
 function parseArgs(argv: string[]): CheckOptions {
   let repoRoot = process.cwd();
-  let repository = process.env.TARGET_REPOSITORY ?? process.env.GITHUB_REPOSITORY ?? "unknown/unknown";
+  let repository =
+    process.env.TARGET_REPOSITORY ?? process.env.GITHUB_REPOSITORY ?? "unknown/unknown";
   let exceptionsPath: string | undefined;
   let targetExceptionsPath: string | undefined;
 
@@ -352,7 +368,8 @@ function parseArgs(argv: string[]): CheckOptions {
   return { repoRoot, repository, exceptionsPath, targetExceptionsPath };
 }
 
-if (import.meta.main) {
+const entrypoint = process.argv[1];
+if (entrypoint && path.resolve(entrypoint) === fileURLToPath(import.meta.url)) {
   const result = runPolicyCheck(parseArgs(process.argv.slice(2)));
 
   if (result.ok) {

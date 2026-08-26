@@ -1,0 +1,17 @@
+name: required-policy-smoke
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: smoke
+    permissions:
+      contents: read
+    uses: ./.github/workflows/required-policy.yml
+    with:
+      repository: yourbright-jp/ci-policy
+      policy-ref: ${{ github.head_ref }}

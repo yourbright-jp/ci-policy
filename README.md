@@ -6,10 +6,10 @@ YourBright org の GitHub Actions 規約を reusable workflow として管理す
 
 YourBright の org-wide harness は **2 レイヤ構成**。それぞれ役割が違い、可視性も違う。
 
-| レイヤ | 役割 | 強制度 | visibility | CI から呼ぶ |
-|---|---|---|---|---|
-| **Guardrails** (this repo) | 検査と強制 | required check で merge block | public | はい (`uses:` で reusable workflow) |
-| **Golden Path** (別の private repo) | 推奨と雛形 | 推奨、各 repo が opt-in | private | いいえ (CI から checkout しない) |
+| レイヤ                              | 役割       | 強制度                        | visibility | CI から呼ぶ                         |
+| ----------------------------------- | ---------- | ----------------------------- | ---------- | ----------------------------------- |
+| **Guardrails** (this repo)          | 検査と強制 | required check で merge block | public     | はい (`uses:` で reusable workflow) |
+| **Golden Path** (別の private repo) | 推奨と雛形 | 推奨、各 repo が opt-in       | private    | いいえ (CI から checkout しない)    |
 
 ### なぜ 2 repo に分けるか
 
@@ -49,12 +49,17 @@ jobs:
   policy:
     permissions:
       contents: read
-    uses: yourbright-jp/ci-policy/.github/workflows/required-policy.yml@v3
+    uses: yourbright-jp/ci-policy/.github/workflows/required-policy.yml@v5
     with:
       repository: yourbright-jp/example-repo
 ```
 
 GitHub の ruleset では、各 repo の `policy / policy` check を required status check にします。
+
+v5 では workflow 規約と PR 本文の必須セクション (`## 概要` / `## テスト`) を同じ
+required job で検証します。検証コードはリリース済みの Node.js bundle を
+`ubuntu-slim` で実行するため、caller ごとの Bun setup / dependency install や
+PR 本文専用 job は不要です。空でない Dependabot PR 本文は見出し検証を免除します。
 
 ### Coverage gate (opt-in)
 
@@ -65,7 +70,7 @@ jobs:
   coverage:
     permissions:
       contents: read
-    uses: yourbright-jp/ci-policy/.github/workflows/coverage-policy.yml@v3
+    uses: yourbright-jp/ci-policy/.github/workflows/coverage-policy.yml@v5
     with:
       repository: yourbright-jp/example-repo
       # 任意 override (省略時は line 60 / branch 50)
@@ -96,7 +101,7 @@ CI と履歴保護の土台です。bypass は設定しません。
   - `policy / policy`
   - repo 固有の verify check
   - repo 固有の package manager check
-  - repo 固有の PR policy check
+  - 必要な repo 固有 check
 - Restrict deletions: on
 - Block force pushes: on
 

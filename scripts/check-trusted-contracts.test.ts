@@ -75,6 +75,22 @@ describe("runTrustedContractCheck", () => {
     expect(runTrustedContractCheck({ baseRepoRoot: base, candidateRepoRoot: candidate })).toEqual([]);
   });
 
+  test("fails closed instead of running checks through a non-Node runtime", () => {
+    const base = makeRepo();
+    const candidate = makeRepo();
+    populate(base);
+    populate(candidate);
+    const previous = process.env.CI_POLICY_TRUSTED_NODE;
+    process.env.CI_POLICY_TRUSTED_NODE = process.execPath;
+    try {
+      const result = runTrustedContractCheck({ baseRepoRoot: base, candidateRepoRoot: candidate });
+      expect(result.map((item) => item.rule)).toEqual(["trusted-contract-runtime-invalid"]);
+    } finally {
+      if (previous === undefined) delete process.env.CI_POLICY_TRUSTED_NODE;
+      else process.env.CI_POLICY_TRUSTED_NODE = previous;
+    }
+  });
+
   test("passes only isolated copies of declared candidate inputs", () => {
     const base = makeRepo();
     const candidate = makeRepo();

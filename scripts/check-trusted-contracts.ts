@@ -383,7 +383,8 @@ function runBaseChecks(
   candidateRoot: string,
   violations: TrustedContractViolation[],
 ) {
-  if (!process.versions.bun && process.versions.node !== TRUSTED_NODE_VERSION) {
+  const trustedNodeExecutable = resolveTrustedNodeExecutable();
+  if (!trustedNodeExecutable) {
     violations.push(
       violation(
         "trusted-contract-runtime-invalid",
@@ -442,10 +443,8 @@ function runBaseChecks(
     }
 
     try {
-      const childArguments = process.versions.bun
-        ? [entrypoint, ...args]
-        : ["--permission", `--allow-fs-read=${isolatedRoot}`, entrypoint, ...args];
-      const result = spawnSync(process.execPath, childArguments, {
+      const childArguments = ["--permission", `--allow-fs-read=${isolatedRoot}`, entrypoint, ...args];
+      const result = spawnSync(trustedNodeExecutable, childArguments, {
         cwd: isolatedRoot,
         encoding: "utf8",
         env: restrictedEnvironment(),
@@ -462,6 +461,26 @@ function runBaseChecks(
     } finally {
       rmSync(isolatedRoot, { force: true, recursive: true });
     }
+  }
+}
+
+function resolveTrustedNodeExecutable(): string | undefined {
+  const executable = process.versions.bun
+    ? process.env.CI_POLICY_TRUSTED_NODE ?? "node"
+    : process.execPath;
+  try {
+    const probe = spawnSync(executable, ["--version"], {
+      encoding: "utf8",
+      env: restrictedEnvironment(),
+      maxBuffer: 1024,
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 5_000,
+      windowsHide: true,
+    });
+    if (probe.error || probe.signal || probe.status !== 0) return undefined;
+    return probe.stdout.trim() === `v${TRUSTED_NODE_VERSION}` ? executable : undefined;
+  } catch {
+    return undefined;
   }
 }
 

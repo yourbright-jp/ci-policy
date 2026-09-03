@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
@@ -37,7 +37,14 @@ type CheckResult = {
   violations: Violation[];
 };
 
+type OptionalFileState =
+  | { kind: "missing" }
+  | { kind: "invalid" }
+  | { kind: "valid"; path: string };
+
 const WORKFLOW_DIR = ".github/workflows";
+const TARGET_EXCEPTIONS_PATH = ".github/ci-policy-exceptions.yaml";
+const MAX_TARGET_EXCEPTIONS_BYTES = 64 * 1024;
 
 const ALLOWED_USES = [
   /^actions\/checkout@v6$/,
@@ -65,20 +72,29 @@ const SHA_PIN = /@[a-f0-9]{40}$/i;
 
 export function runPolicyCheck(options: CheckOptions): CheckResult {
   const repoRoot = path.resolve(options.repoRoot);
-  const exceptionRepoRoot = options.baseRepoRoot && existsSync(options.baseRepoRoot)
-    ? path.resolve(options.baseRepoRoot)
-    : repoRoot;
   const now = options.now ?? new Date();
+  const violations: Violation[] = [];
+  const targetExceptionRoot = options.baseRepoRoot === undefined
+    ? repoRoot
+    : options.baseRepoRoot;
+  const targetExceptionsFile = resolveOptionalFileInsideRoot(
+    targetExceptionRoot,
+    options.targetExceptionsPath ?? path.join(targetExceptionRoot, TARGET_EXCEPTIONS_PATH),
+    MAX_TARGET_EXCEPTIONS_BYTES,
+  );
+  if (targetExceptionsFile.kind === "invalid") {
+    violations.push({
+      rule: "target-exceptions-invalid",
+      path: TARGET_EXCEPTIONS_PATH,
+      message: "Target exceptions must be a bounded regular file inside the trusted repository root.",
+    });
+  }
   const exceptions = [
     ...loadExceptions(
       options.exceptionsPath ?? path.join(process.cwd(), "policies", "exceptions.yaml"),
     ),
-    ...loadExceptions(
-      options.targetExceptionsPath
-        ?? path.join(exceptionRepoRoot, ".github", "ci-policy-exceptions.yaml"),
-    ),
+    ...(targetExceptionsFile.kind === "valid" ? loadExceptions(targetExceptionsFile.path) : []),
   ];
-  const violations: Violation[] = [];
 
   const bunRepo = isBunRepo(repoRoot);
   if (bunRepo && !existsSync(path.join(repoRoot, "bun.lock"))) {
@@ -391,6 +407,57 @@ function parseArgs(argv: string[]): CheckOptions {
     exceptionsPath,
     targetExceptionsPath,
   };
+}
+
+function resolveOptionalFileInsideRoot(
+  rootPath: string,
+  requestedPath: string,
+  maxBytes: number,
+): OptionalFileState {
+  try {
+    const lexicalRoot = path.resolve(rootPath);
+    const rootMetadata = lstatSync(lexicalRoot);
+    if (!rootMetadata.isDirectory() || rootMetadata.isSymbolicLink()) return { kind: "invalid" };
+    const root = realpathSync(lexicalRoot);
+    const absolutePath = path.resolve(requestedPath);
+    const relativePath = path.relative(lexicalRoot, absolutePath);
+    if (relativePath === "" || relativePath === ".." || relativePath.startsWith(`..${path.sep}`) || path.isAbsolute(relativePath)) {
+      return { kind: "invalid" };
+    }
+
+    let current = root;
+    const segments = relativePath.split(path.sep);
+    for (const [index, segment] of segments.entries()) {
+      current = path.join(current, segment);
+      let metadata;
+      try {
+        metadata = lstatSync(current);
+      } catch (error) {
+        if (isNodeError(error) && error.code === "ENOENT") return { kind: "missing" };
+        return { kind: "invalid" };
+      }
+      if (metadata.isSymbolicLink()) return { kind: "invalid" };
+      const isLast = index === segments.length - 1;
+      if (!isLast && !metadata.isDirectory()) return { kind: "invalid" };
+      if (isLast && (!metadata.isFile() || metadata.size > maxBytes)) return { kind: "invalid" };
+    }
+
+    const canonicalPath = realpathSync(current);
+    const canonicalRelativePath = path.relative(root, canonicalPath);
+    if (canonicalRelativePath === ".."
+      || canonicalRelativePath.startsWith(`..${path.sep}`)
+      || path.isAbsolute(canonicalRelativePath)) {
+      return { kind: "invalid" };
+    }
+    return { kind: "valid", path: canonicalPath };
+  } catch (error) {
+    if (isNodeError(error) && error.code === "ENOENT") return { kind: "missing" };
+    return { kind: "invalid" };
+  }
+}
+
+function isNodeError(value: unknown): value is NodeJS.ErrnoException {
+  return value instanceof Error && "code" in value;
 }
 
 const entrypoint = process.argv[1];

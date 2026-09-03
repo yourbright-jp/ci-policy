@@ -1,0 +1,65 @@
+name: trusted-target-contracts
+
+on:
+  pull_request:
+  merge_group:
+
+permissions:
+  contents: read
+
+jobs:
+  trusted-contracts:
+    name: trusted-contracts
+    if: github.repository != 'yourbright-jp/ci-policy'
+    runs-on: ubuntu-slim
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout target repository
+        uses: actions/checkout@v6
+        with:
+          path: target
+          persist-credentials: false
+
+      - name: Checkout pull request base
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: target-base
+          persist-credentials: false
+
+      - name: Checkout merge group base
+        if: github.event_name == 'merge_group'
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.merge_group.base_sha }}
+          path: target-base
+          persist-credentials: false
+
+      - name: Checkout policy implementation
+        uses: actions/checkout@v6
+        with:
+          repository: yourbright-jp/ci-policy
+          ref: v6
+          path: ci-policy
+          persist-credentials: false
+
+      - name: Setup trusted Node runtime
+        uses: actions/setup-node@v6
+        with:
+          node-version: 26.8.1
+
+      - name: Verify trusted Node network denial
+        run: node --permission ci-policy/scripts/assert-node-network-denied.mjs
+
+      - name: Run central policy checks
+        env:
+          TARGET_REPOSITORY: ${{ github.repository }}
+        run: >-
+          node ci-policy/dist/check-workflows.mjs
+          --repo "$GITHUB_WORKSPACE/target"
+          --base-repo "$GITHUB_WORKSPACE/target-base"
+          --require-trusted-contract
+          --repository "$TARGET_REPOSITORY"

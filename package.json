@@ -9,6 +9,7 @@
     "test": "bun test"
   },
   "dependencies": {
+    "acorn": "^8.18.0",
     "js-yaml": "^4.3.1"
   },
   "devDependencies": {

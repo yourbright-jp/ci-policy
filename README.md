@@ -41,6 +41,8 @@ on:
     branches:
       - main
   pull_request:
+    types: [opened, synchronize, reopened, edited]
+  merge_group:
 
 permissions:
   contents: read
@@ -49,17 +51,86 @@ jobs:
   policy:
     permissions:
       contents: read
-    uses: yourbright-jp/ci-policy/.github/workflows/required-policy.yml@v5
+    uses: yourbright-jp/ci-policy/.github/workflows/required-policy.yml@v6
     with:
       repository: yourbright-jp/example-repo
 ```
 
 GitHub の ruleset では、各 repo の `policy / policy` check を required status check にします。
 
-v5 では workflow 規約と PR 本文の必須セクション (`## 概要` / `## テスト`) を同じ
+v6 では workflow 規約と PR 本文の必須セクション (`## 概要` / `## テスト`) を同じ
 required job で検証します。検証コードはリリース済みの Node.js bundle を
 `ubuntu-slim` で実行するため、caller ごとの Bun setup / dependency install や
 PR 本文専用 job は不要です。空でない Dependabot PR 本文は見出し検証を免除します。
+pull request / merge group / main push では base と candidate を別 checkout し、例外は
+base 版だけを読みます。同じ PR で追加した例外による自己免除はできません。
+
+### Trusted target contract (opt-in)
+
+対象 repo の `.github/ci-policy-contract.json` が base に存在すると、v6 は candidate が
+既存契約を弱めていないこと、指定ファイルの byte が変わっていないことを確認し、base
+版の Node checker だけを実行します。checker には GitHub token や secret を渡さず、出力も
+破棄します。中央 public repo に対象 repo 名や内部パスを置く必要はありません。
+
+```json
+{
+  "schema_version": 1,
+  "immutable_files": [
+    "scripts/verify-policy-history.mjs",
+    "scripts/lib/policy-schema.mjs"
+  ],
+  "trusted_node_checks": {
+    "policy-history-v1": {
+      "entrypoint": "scripts/verify-policy-history.mjs",
+      "arguments": [
+        { "root": "base", "path": "data/policy.json", "kind": "file" },
+        { "root": "candidate", "path": "data/policy.json", "kind": "file" }
+      ]
+    }
+  }
+}
+```
+
+契約は追記のみ可能です。既存の immutable file / trusted check は削除・変更できません。
+candidate directoryは渡せず、列挙したregular fileだけを引数にできます。entrypointの静的な
+local import closureはAcornで構文解析し、すべてimmutable fileへ含めます。bare package、dynamic
+import、require、code-loading builtin、percent/query/fragmentを含むURL型specifierは拒否します。
+Node builtinは `node:crypto` / `node:fs` / `node:fs/promises` / `node:net` / `node:path` / `node:util` だけを許可します。
+loader capabilityのmember取得・別名化、`global` / `globalThis` / `WebAssembly`、computedまたは別名経由の
+`process` accessも拒否し、checker内の `process` は `argv` / `env` / `exit` / `exitCode` の直接参照だけを許可します。
+実行時にも文字列からのcode generationを無効化します。
+実行可能moduleは `.mjs` だけとし、baseからimmutable closureだけを一時隔離directoryのprogram treeへ複製して
+実行するため、未列挙のbase fileや `package.json` は実行意味に影響できません。宣言済みargumentも
+base/candidate checkoutからdisjointな隔離input treeへ排他的に複製して、その複製pathだけをcheckerへ渡します。
+各argumentは現在の実行では宣言した `root` から解決し、candidate snapshot内にも全件が存在することを必須にします。
+さらに既存checkを `(base, candidate)` で実行した後、既存checkと今回有効化するcheckを `(candidate, candidate)`
+でも実行します。後者もすでにimmutableなbase module closureだけを使い、merge後にcandidateが次のtrusted baseへ
+なっても発展後の契約が自己完結して成功することをmerge前に確認します。
+checkerはBunや別Nodeで直接実行せず、exact Node 26.8.1が確認できなければfail closedにします。
+Node 26.8.1の[Permission Model](https://nodejs.org/api/permissions.html)をenforce modeで使い、`--allow-net`を
+付けずnetworkを既定拒否し、隔離tree以外のfilesystem read、全filesystem write、child process、worker、
+native addon、WASIも許可しません。workflowはexact Node versionとnet/http/fetch/DNS/UDPの実拒否を先に検証します。
+Permission Modelはreview済みbase checkerのblast radiusを抑えるseat beltであり、candidate codeのsandboxとは扱いません。
+
+信頼境界はbaseでreview・immutable化済みのchecker本体です。executor自身がcandidate fileをmoduleとして
+解決・import・起動することはなく、candidateは実行moduleや依存を差し替えられません。宣言済みdataの
+解釈はtrusted checkerの責任なので、bootstrap時にはcheckerがdataをcodeとして評価しないことも人手で
+reviewしてからsource workflow rulesetを有効化します。
+
+新checkerは2段階で有効化します。最初のPRでは実装と依存closureをimmutable fileとして追加し、
+次のPRでtrusted checkを追加します。entrypointとlocal dependency closureの全体がすでにbaseで
+immutableでなければactivationは失敗し、activation PRでもcandidate codeは実行しません。
+すでにbaseでimmutable化済みの新checkerがcandidate自身を検査して失敗する場合もactivationを拒否します。
+初回bootstrap契約の `trusted_node_checks` も必ず空にし、最初からactiveなcheckを持つ契約は拒否します。
+
+初回 bootstrap PR は必ず人手で内容を確認し、merge後にrulesetを有効化します。中央source
+workflowはbase契約がない対象をfail closedにするため、bootstrap前に有効化してはいけません。
+
+caller workflow の置換で required status 名を偽装できないよう、組織 ruleset ではこの repo の
+`.github/workflows/trusted-target-contracts.yml` を `Require workflows to pass before merging` の
+source workflow として保護済みrelease tagで指定するのが正本です。release tagの更新・削除も
+tag rulesetで禁止します。通常の
+`policy / policy` required status check は補助防御として併用します。
 
 ### Coverage gate (opt-in)
 
@@ -70,7 +141,7 @@ jobs:
   coverage:
     permissions:
       contents: read
-    uses: yourbright-jp/ci-policy/.github/workflows/coverage-policy.yml@v5
+    uses: yourbright-jp/ci-policy/.github/workflows/coverage-policy.yml@v6
     with:
       repository: yourbright-jp/example-repo
       # 任意 override (省略時は line 60 / branch 50)

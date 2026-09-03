@@ -10,7 +10,7 @@ on:
       policy-ref:
         description: ci-policy self-test ref. Ignored for caller repositories.
         required: false
-        default: v5
+        default: v6
         type: string
 
 permissions:
@@ -28,13 +28,47 @@ jobs:
         uses: actions/checkout@v6
         with:
           path: target
+          persist-credentials: false
+
+      - name: Checkout pull request base
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: target-base
+          persist-credentials: false
+
+      - name: Checkout merge group base
+        if: github.event_name == 'merge_group'
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.merge_group.base_sha }}
+          path: target-base
+          persist-credentials: false
+
+      - name: Checkout push parent
+        if: github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000'
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.before }}
+          path: target-base
+          persist-credentials: false
 
       - name: Checkout policy repository
         uses: actions/checkout@v6
         with:
           repository: yourbright-jp/ci-policy
-          ref: ${{ github.repository == 'yourbright-jp/ci-policy' && inputs.policy-ref || 'v5' }}
+          ref: ${{ github.repository == 'yourbright-jp/ci-policy' && inputs.policy-ref || 'v6' }}
           path: ci-policy
+          persist-credentials: false
+
+      - name: Setup trusted Node runtime
+        uses: actions/setup-node@v6
+        with:
+          node-version: 26.8.1
+
+      - name: Verify trusted Node network denial
+        run: node --permission ci-policy/scripts/assert-node-network-denied.mjs
 
       - name: Setup Bun for policy self-test
         if: github.repository == 'yourbright-jp/ci-policy'
@@ -64,4 +98,5 @@ jobs:
         run: >-
           node ci-policy/dist/check-workflows.mjs
           --repo "$GITHUB_WORKSPACE/target"
+          --base-repo "$GITHUB_WORKSPACE/target-base"
           --repository "$TARGET_REPOSITORY"

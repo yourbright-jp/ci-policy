@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { runPolicyCheck } from "./check-workflows";
@@ -120,7 +120,7 @@ jobs:
     );
   });
 
-  test("allows ci-policy reusable workflows at v4 and v5", () => {
+  test("allows ci-policy reusable workflows at v4 through v6", () => {
     const repo = makeRepo({
       ".github/workflows/policy.yml": `
 name: policy
@@ -156,6 +156,23 @@ jobs:
     });
 
     expect(check(v5Repo).ok).toBe(true);
+
+    const v6Repo = makeRepo({
+      ".github/workflows/policy.yml": `
+name: policy
+on:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  policy:
+    permissions:
+      contents: read
+    uses: yourbright-jp/ci-policy/.github/workflows/required-policy.yml@v6
+`,
+    });
+
+    expect(check(v6Repo).ok).toBe(true);
   });
 
   test("blocks deploy commands in GitHub Actions", () => {
@@ -277,5 +294,150 @@ jobs:
     });
 
     expect(check(repo).ok).toBe(true);
+  });
+
+  test("does not trust an exception introduced by the candidate pull request", () => {
+    const base = makeRepo({});
+    const candidate = makeRepo({
+      ".github/ci-policy-exceptions.yaml": `
+exceptions:
+  - repo: "*"
+    rule: "*"
+    reason: self exemption
+    owner: attacker
+    expires: "2099-12-31"
+`,
+      ".github/workflows/test.yml": `
+name: unsafe
+on:
+  pull_request_target:
+jobs:
+  unsafe:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo unsafe
+`,
+    });
+
+    const result = runPolicyCheck({
+      repoRoot: candidate,
+      baseRepoRoot: base,
+      repository: "yourbright-jp/example",
+      exceptionsPath: path.join(base, "missing-exceptions.yaml"),
+      now: new Date("2026-04-19T00:00:00Z"),
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.violations.map((item) => item.rule)).toContain("pull-request-target-forbidden");
+    expect(result.violations.map((item) => item.rule)).toContain("workflow-permissions-required");
+  });
+
+  test("loads project-specific exceptions from a valid base checkout", () => {
+    const base = makeRepo({
+      ".github/ci-policy-exceptions.yaml": `
+exceptions:
+  - repo: yourbright-jp/example
+    rule: workflow-permissions-required
+    path: .github/workflows/test.yml
+    reason: migration window
+    owner: "@yourbright-jp/platform"
+    expires: "2026-05-31"
+`,
+    });
+    const candidate = makeRepo({
+      ".github/workflows/test.yml": `
+name: test
+on:
+  pull_request:
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ok
+`,
+    });
+
+    const result = runPolicyCheck({
+      repoRoot: candidate,
+      baseRepoRoot: base,
+      repository: "yourbright-jp/example",
+      exceptionsPath: path.join(base, "missing-exceptions.yaml"),
+      now: new Date("2026-04-19T00:00:00Z"),
+    });
+
+    expect(result.ok).toBe(true);
+  });
+
+  test("does not fall back to candidate exceptions when an explicit base checkout is missing", () => {
+    const candidate = makeRepo({
+      ".github/ci-policy-exceptions.yaml": `
+exceptions:
+  - repo: "*"
+    rule: "*"
+    reason: self exemption
+    owner: attacker
+    expires: "2099-12-31"
+`,
+      ".github/workflows/test.yml": `
+name: unsafe
+on:
+  pull_request_target:
+jobs:
+  unsafe:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo unsafe
+`,
+    });
+
+    const result = runPolicyCheck({
+      repoRoot: candidate,
+      baseRepoRoot: path.join(candidate, "missing-base"),
+      repository: "yourbright-jp/example",
+      exceptionsPath: path.join(candidate, "missing-exceptions.yaml"),
+      now: new Date("2026-04-19T00:00:00Z"),
+    });
+
+    expect(result.violations.map((item) => item.rule)).toContain("pull-request-target-forbidden");
+    expect(result.violations.map((item) => item.rule)).toContain("workflow-permissions-required");
+  });
+
+  test("rejects target exception paths with a symlinked component", () => {
+    const base = makeRepo({});
+    const candidate = makeRepo({
+      ".github/ci-policy-exceptions.yaml": `
+exceptions:
+  - repo: "*"
+    rule: "*"
+    reason: self exemption
+    owner: attacker
+    expires: "2099-12-31"
+`,
+      ".github/workflows/test.yml": `
+name: unsafe
+on:
+  pull_request_target:
+jobs:
+  unsafe:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo unsafe
+`,
+    });
+    mkdirSync(path.join(base, ".github"), { recursive: true });
+    symlinkSync(path.join(candidate, ".github"), path.join(base, ".github", "linked"), "junction");
+
+    const result = runPolicyCheck({
+      repoRoot: candidate,
+      baseRepoRoot: base,
+      repository: "yourbright-jp/example",
+      exceptionsPath: path.join(base, "missing-exceptions.yaml"),
+      targetExceptionsPath: path.join(base, ".github", "linked", "ci-policy-exceptions.yaml"),
+      now: new Date("2026-04-19T00:00:00Z"),
+    });
+
+    expect(result.violations.map((item) => item.rule)).toContain("target-exceptions-invalid");
+    expect(result.violations.map((item) => item.rule)).toContain("pull-request-target-forbidden");
+    expect(result.violations.map((item) => item.rule)).toContain("workflow-permissions-required");
   });
 });

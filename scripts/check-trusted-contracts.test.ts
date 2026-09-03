@@ -1,0 +1,600 @@
+import { afterEach, describe, expect, test } from "bun:test";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { runTrustedContractCheck } from "./check-trusted-contracts";
+
+const roots: string[] = [];
+
+afterEach(() => {
+  delete process.env.GITHUB_TOKEN;
+  while (roots.length > 0) {
+    const root = roots.pop();
+    if (root && existsSync(root)) rmSync(root, { force: true, recursive: true });
+  }
+});
+
+function makeRepo(): string {
+  const root = mkdtempSync(path.join(tmpdir(), "trusted-contract-"));
+  roots.push(root);
+  return root;
+}
+
+function write(root: string, relativePath: string, content: string | Uint8Array) {
+  const filePath = path.join(root, ...relativePath.split("/"));
+  mkdirSync(path.dirname(filePath), { recursive: true });
+  writeFileSync(filePath, content);
+}
+
+function contract() {
+  return {
+    schema_version: 1,
+    immutable_files: ["scripts/verify.mjs"],
+    trusted_node_checks: {
+      "candidate-data-v1": {
+        entrypoint: "scripts/verify.mjs",
+        arguments: [{ root: "candidate", path: "data/state.txt", kind: "file" }],
+      },
+    },
+  } as const;
+}
+
+function populate(root: string, state = "safe") {
+  write(
+    root,
+    "scripts/verify.mjs",
+    `import { readFileSync } from "node:fs";
+if (process.env.GITHUB_TOKEN || readFileSync(process.argv[2], "utf8") !== "safe") process.exit(1);
+`,
+  );
+  write(root, "data/state.txt", state);
+  write(root, ".github/ci-policy-contract.json", `${JSON.stringify(contract(), null, 2)}\n`);
+}
+
+describe("runTrustedContractCheck", () => {
+  test("accepts a bootstrap that only stages immutable checker code", () => {
+    const candidate = makeRepo();
+    populate(candidate, "unsafe");
+    const staged = structuredClone(contract()) as any;
+    staged.trusted_node_checks = {};
+    write(candidate, ".github/ci-policy-contract.json", `${JSON.stringify(staged, null, 2)}\n`);
+
+    expect(runTrustedContractCheck({ candidateRepoRoot: candidate })).toEqual([]);
+  });
+
+  test("rejects active trusted checks in the initial bootstrap contract", () => {
+    const candidate = makeRepo();
+    populate(candidate);
+
+    expect(runTrustedContractCheck({ candidateRepoRoot: candidate }).map((item) => item.rule))
+      .toEqual(["trusted-contract-config-invalid"]);
+  });
+
+  test("executes only the base check with a stripped environment", () => {
+    const base = makeRepo();
+    const candidate = makeRepo();
+    populate(base);
+    populate(candidate);
+    process.env.GITHUB_TOKEN = "must-not-reach-check";
+
+    expect(runTrustedContractCheck({ baseRepoRoot: base, candidateRepoRoot: candidate })).toEqual([]);
+  });
+
+  test("resolves base-root arguments from the base while keeping the next snapshot viable", () => {
+    const base = makeRepo();
+    const candidate = makeRepo();
+    populate(base);
+    populate(candidate, "unsafe");
+    const rootedContract = structuredClone(contract()) as any;
+    rootedContract.trusted_node_checks["candidate-data-v1"].arguments = [
+      { root: "base", path: "data/state.txt", kind: "file" },
+      { root: "candidate", path: "data/state.txt", kind: "file" },
+    ];
+    const checker = `import { readFileSync } from "node:fs";
+const values = process.argv.slice(2).map((input) => readFileSync(input, "utf8"));
+const currentTransition = values[0] === "safe" && values[1] === "unsafe";
+const nextBaseIsViable = values[0] === "unsafe" && values[1] === "unsafe";
+if (!currentTransition && !nextBaseIsViable) process.exit(1);
+`;
+    write(base, "scripts/verify.mjs", checker);
+    write(candidate, "scripts/verify.mjs", checker);
+    write(base, ".github/ci-policy-contract.json", `${JSON.stringify(rootedContract, null, 2)}\n`);
+    write(candidate, ".github/ci-policy-contract.json", `${JSON.stringify(rootedContract, null, 2)}\n`);
+
+    expect(runTrustedContractCheck({ baseRepoRoot: base, candidateRepoRoot: candidate })).toEqual([]);
+
+    rmSync(path.join(candidate, "data", "state.txt"));
+    expect(runTrustedContractCheck({ baseRepoRoot: base, candidateRepoRoot: candidate }).map((item) => item.rule))
+      .toEqual(["trusted-contract-config-invalid"]);
+  });
+
+  test("rejects a change that would make the candidate fail as the next trusted base", () => {
+    const base = makeRepo();
+    const candidate = makeRepo();
+    populate(base);
+    populate(candidate, "unsafe");
+    const baseOnlyContract = structuredClone(contract()) as any;
+    baseOnlyContract.trusted_node_checks["candidate-data-v1"].arguments = [
+      { root: "base", path: "data/state.txt", kind: "file" },
+    ];
+    write(base, ".github/ci-policy-contract.json", `${JSON.stringify(baseOnlyContract, null, 2)}\n`);
+    write(candidate, ".github/ci-policy-contract.json", `${JSON.stringify(baseOnlyContract, null, 2)}\n`);
+
+    expect(runTrustedContractCheck({ baseRepoRoot: base, candidateRepoRoot: candidate }).map((item) => item.rule))
+      .toContain("trusted-contract-check-failed");
+  });
+
+  test("denies network access in the actual trusted checker child", () => {
+    const base = makeRepo();
+    const candidate = makeRepo();
+    populate(base);
+    populate(candidate);
+    const checker = `import net from "node:net";
+const error = await new Promise((resolve) => {
+  let socket;
+  const timer = setTimeout(() => resolve(new Error("network probe timed out")), 2000);
+  try {
+    socket = net.connect({ host: "127.0.0.1", port: 45678 });
+  } catch (caught) {
+    clearTimeout(timer);
+    resolve(caught);
+    return;
+  }
+  socket.once("connect", () => {
+    clearTimeout(timer);
+    socket.destroy();
+    resolve(new Error("network probe connected"));
+  });
+  socket.once("error", (caught) => {
+    clearTimeout(timer);
+    resolve(caught);
+  });
+});
+const denied = error?.code === "ERR_ACCESS_DENIED"
+  || error?.cause?.code === "ERR_ACCESS_DENIED"
+  || error?.errno?.code === "ERR_ACCESS_DENIED";
+if (!denied) process.exit(1);
+`;
+    write(base, "scripts/verify.mjs", checker);
+    write(candidate, "scripts/verify.mjs", checker);
+
+    expect(runTrustedContractCheck({ baseRepoRoot: base, candidateRepoRoot: candidate })).toEqual([]);
+  });
+
+  test("fails closed instead of running checks through a non-Node runtime", () => {
+    const base = makeRepo();
+    const candidate = makeRepo();
+    populate(base);
+    populate(candidate);
+    const previous = process.env.CI_POLICY_TRUSTED_NODE;
+    process.env.CI_POLICY_TRUSTED_NODE = process.execPath;
+    try {
+      const result = runTrustedContractCheck({ baseRepoRoot: base, candidateRepoRoot: candidate });
+      expect(result.map((item) => item.rule)).toEqual(["trusted-contract-runtime-invalid"]);
+    } finally {
+      if (previous === undefined) delete process.env.CI_POLICY_TRUSTED_NODE;
+      else process.env.CI_POLICY_TRUSTED_NODE = previous;
+    }
+  });
+
+  test("passes only isolated copies of declared candidate inputs", () => {
+    const base = makeRepo();
+    const candidate = makeRepo();
+    populate(base);
+    populate(candidate);
+    const checker = `import { readFileSync } from "node:fs";
+const input = process.argv[2].replaceAll("\\\\", "/");
+if (!input.includes("/inputs/candidate/data/state.txt") || readFileSync(input, "utf8") !== "safe") process.exit(1);
+`;
+    write(base, "scripts/verify.mjs", checker);
+    write(candidate, "scripts/verify.mjs", checker);
+
+    expect(runTrustedContractCheck({ baseRepoRoot: base, candidateRepoRoot: candidate })).toEqual([]);
+  });
+
+  test("keeps staged inputs disjoint from the immutable program tree", () => {
+    const base = makeRepo();
+    const candidate = makeRepo();
+    const collisionContract = {
+      schema_version: 1,
+      immutable_files: ["inputs/candidate/data/state.mjs"],
+      trusted_node_checks: {
+        "collision-v1": {
+          entrypoint: "inputs/candidate/data/state.mjs",
+          arguments: [{ root: "candidate", path: "data/state.mjs", kind: "file" }],
+        },
+      },
+    };
+    const checker = `import { readFileSync } from "node:fs";
+if (readFileSync(process.argv[2], "utf8") !== "candidate data") process.exit(1);
+`;
+    for (const root of [base, candidate]) {
+      write(root, "inputs/candidate/data/state.mjs", checker);
+      write(root, ".github/ci-policy-contract.json", `${JSON.stringify(collisionContract, null, 2)}\n`);
+    }
+    write(base, "data/state.mjs", "base data");
+    write(candidate, "data/state.mjs", "candidate data");
+
+    expect(runTrustedContractCheck({ baseRepoRoot: base, candidateRepoRoot: candidate })).toEqual([]);
+  });
+
+  test("rejects duplicate or case-aliased staged arguments", () => {
+    for (const duplicatePath of ["data/state.txt", "DATA/state.txt"]) {
+      const candidate = makeRepo();
+      populate(candidate);
+      const invalid = structuredClone(contract()) as any;
+      invalid.trusted_node_checks["candidate-data-v1"].arguments.push({
+        root: "candidate",
+        path: duplicatePath,
+        kind: "file",
+      });
+      write(candidate, ".github/ci-policy-contract.json", `${JSON.stringify(invalid, null, 2)}\n`);
+
+      expect(runTrustedContractCheck({ candidateRepoRoot: candidate }).map((item) => item.rule))
+        .toEqual(["trusted-contract-config-invalid"]);
+    }
+  });
+
+  test("rejects candidate data that fails a trusted base check", () => {
+    const base = makeRepo();
+    const candidate = makeRepo();
+    populate(base);
+    populate(candidate, "unsafe");
+
+    const result = runTrustedContractCheck({ baseRepoRoot: base, candidateRepoRoot: candidate });
+    expect(result.map((item) => item.rule)).toContain("trusted-contract-check-failed");
+  });
+
+  test("rejects an immutable checker edit before executing it", () => {
+    const base = makeRepo();
+    const candidate = makeRepo();
+    populate(base);
+    populate(candidate, "unsafe");
+    write(candidate, "scripts/verify.mjs", "process.exit(0);\n");
+
+    const result = runTrustedContractCheck({ baseRepoRoot: base, candidateRepoRoot: candidate });
+    expect(result.map((item) => item.rule)).toContain("trusted-contract-immutable-file-changed");
+    expect(result.map((item) => item.rule)).not.toContain("trusted-contract-check-failed");
+  });
+
+  test("rejects removal or mutation of an established contract rule", () => {
+    const base = makeRepo();
+    const candidate = makeRepo();
+    populate(base);
+    populate(candidate);
+    write(
+      candidate,
+      ".github/ci-policy-contract.json",
+      `${JSON.stringify({ schema_version: 1, immutable_files: [], trusted_node_checks: {} }, null, 2)}\n`,
+    );
+
+    const result = runTrustedContractCheck({ baseRepoRoot: base, candidateRepoRoot: candidate });
+    expect(result.filter((item) => item.rule === "trusted-contract-weakened")).toHaveLength(2);
+  });
+
+  test("allows staging a new immutable checker without activating it", () => {
+    const base = makeRepo();
+    const candidate = makeRepo();
+    populate(base);
+    populate(candidate);
+    const next = structuredClone(contract()) as any;
+    next.immutable_files.push("scripts/future.mjs");
+    write(candidate, "scripts/future.mjs", "process.exit(1);\n");
+    write(candidate, ".github/ci-policy-contract.json", `${JSON.stringify(next, null, 2)}\n`);
+
+    expect(runTrustedContractCheck({ baseRepoRoot: base, candidateRepoRoot: candidate })).toEqual([]);
+  });
+
+  test("requires a new checker to be immutable in the base before activation", () => {
+    const base = makeRepo();
+    const candidate = makeRepo();
+    populate(base);
+    populate(candidate);
+    const next = structuredClone(contract()) as any;
+    next.immutable_files.push("scripts/future.mjs");
+    next.trusted_node_checks["future-v1"] = {
+      entrypoint: "scripts/future.mjs",
+      arguments: [],
+    };
+    write(candidate, "scripts/future.mjs", "process.exit(1);\n");
+    write(candidate, ".github/ci-policy-contract.json", `${JSON.stringify(next, null, 2)}\n`);
+
+    const result = runTrustedContractCheck({ baseRepoRoot: base, candidateRepoRoot: candidate });
+    expect(result.map((item) => item.rule)).toContain("trusted-contract-check-not-staged");
+  });
+
+  test("rejects activation when the staged checker would fail in the next base", () => {
+    const base = makeRepo();
+    const candidate = makeRepo();
+    populate(base);
+    populate(candidate);
+    const staged = structuredClone(contract()) as any;
+    staged.immutable_files.push("scripts/future.mjs");
+    write(base, "scripts/future.mjs", "process.exit(1);\n");
+    write(candidate, "scripts/future.mjs", "process.exit(1);\n");
+    write(base, ".github/ci-policy-contract.json", `${JSON.stringify(staged, null, 2)}\n`);
+    const activated = structuredClone(staged);
+    activated.trusted_node_checks["future-v1"] = {
+      entrypoint: "scripts/future.mjs",
+      arguments: [],
+    };
+    write(candidate, ".github/ci-policy-contract.json", `${JSON.stringify(activated, null, 2)}\n`);
+
+    expect(runTrustedContractCheck({ baseRepoRoot: base, candidateRepoRoot: candidate }).map((item) => item.rule))
+      .toContain("trusted-contract-check-failed");
+  });
+
+  test("activates a viable staged checker using only its immutable base closure", () => {
+    const base = makeRepo();
+    const candidate = makeRepo();
+    populate(base);
+    populate(candidate);
+    const staged = structuredClone(contract()) as any;
+    staged.immutable_files.push("scripts/future.mjs");
+    write(base, "scripts/future.mjs", "process.exit(0);\n");
+    write(candidate, "scripts/future.mjs", "process.exit(0);\n");
+    write(base, ".github/ci-policy-contract.json", `${JSON.stringify(staged, null, 2)}\n`);
+    const activated = structuredClone(staged);
+    activated.trusted_node_checks["future-v1"] = {
+      entrypoint: "scripts/future.mjs",
+      arguments: [],
+    };
+    write(candidate, ".github/ci-policy-contract.json", `${JSON.stringify(activated, null, 2)}\n`);
+
+    expect(runTrustedContractCheck({ baseRepoRoot: base, candidateRepoRoot: candidate })).toEqual([]);
+  });
+
+  test("requires every local dependency to be immutable in the base before activation", () => {
+    const base = makeRepo();
+    const candidate = makeRepo();
+    populate(base);
+    populate(candidate);
+    const staged = structuredClone(contract()) as any;
+    staged.immutable_files.push("scripts/future.mjs");
+    write(base, "scripts/future.mjs", 'import "./future-helper.mjs";\n');
+    write(base, "scripts/future-helper.mjs", "process.exit(1);\n");
+    write(base, ".github/ci-policy-contract.json", `${JSON.stringify(staged, null, 2)}\n`);
+
+    const activated = structuredClone(staged);
+    activated.immutable_files.push("scripts/future-helper.mjs");
+    activated.trusted_node_checks["future-v1"] = {
+      entrypoint: "scripts/future.mjs",
+      arguments: [],
+    };
+    write(candidate, "scripts/future.mjs", 'import "./future-helper.mjs";\n');
+    write(candidate, "scripts/future-helper.mjs", "process.exit(0);\n");
+    write(candidate, ".github/ci-policy-contract.json", `${JSON.stringify(activated, null, 2)}\n`);
+
+    const result = runTrustedContractCheck({ baseRepoRoot: base, candidateRepoRoot: candidate });
+    expect(result.map((item) => item.rule)).toContain("trusted-contract-check-not-staged");
+  });
+
+  test("requires the full local import closure to be immutable", () => {
+    const candidate = makeRepo();
+    write(candidate, "scripts/verify.mjs", 'import "./helper.mjs";\n');
+    write(candidate, "scripts/helper.mjs", "process.exit(0);\n");
+    write(candidate, "data/state.txt", "safe");
+    write(candidate, ".github/ci-policy-contract.json", `${JSON.stringify(contract(), null, 2)}\n`);
+
+    const result = runTrustedContractCheck({ candidateRepoRoot: candidate });
+    expect(result.map((item) => item.rule)).toEqual(["trusted-contract-config-invalid"]);
+  });
+
+  test("parses comment-separated imports and rejects dynamic or URL-encoded imports", () => {
+    for (const source of [
+      'import/*comment*/ "./helper.mjs";\n',
+      'await import/*comment*/("./helper.mjs");\n',
+      'import "./%2e%2e/helper.mjs";\n',
+      'import "./%68elper.mjs";\n',
+    ]) {
+      const candidate = makeRepo();
+      populate(candidate);
+      write(candidate, "scripts/verify.mjs", source);
+
+      const result = runTrustedContractCheck({ candidateRepoRoot: candidate });
+      expect(result.map((item) => item.rule)).toEqual(["trusted-contract-config-invalid"]);
+    }
+  });
+
+  test("rejects js entrypoints and code-loading capabilities", () => {
+    const jsBase = makeRepo();
+    const jsCandidate = makeRepo();
+    populate(jsBase);
+    populate(jsCandidate);
+    const jsContract = structuredClone(contract()) as any;
+    jsContract.immutable_files = ["scripts/verify.js"];
+    jsContract.trusted_node_checks["candidate-data-v1"].entrypoint = "scripts/verify.js";
+    write(jsBase, "scripts/verify.js", "process.exit(0);\n");
+    write(jsCandidate, "scripts/verify.js", "process.exit(0);\n");
+    write(jsBase, ".github/ci-policy-contract.json", `${JSON.stringify(jsContract, null, 2)}\n`);
+    write(jsCandidate, ".github/ci-policy-contract.json", `${JSON.stringify(jsContract, null, 2)}\n`);
+    expect(runTrustedContractCheck({ baseRepoRoot: jsBase, candidateRepoRoot: jsCandidate }).map((item) => item.rule))
+      .toEqual(["trusted-contract-config-invalid"]);
+
+    for (const source of [
+      'import { createRequire } from "node:module"; createRequire(import.meta.url)("./mutable.cjs");\n',
+      'import processAlias from "node:process"; const key = "getBuiltin" + "Module"; processAlias[key]("node:module");\n',
+      'import { run } from "node:test"; run({ files: [process.argv[2]], isolation: "none" });\n',
+      'import inspector from "node:inspector"; inspector.open();\n',
+      'import "node:inspector/promises";\n',
+      'import "node:ffi";\n',
+      'import "node:wasi";\n',
+      'const load = process.getBuiltinModule; load("module");\n',
+      'const load = process["getBuiltinModule"]; load("node:module").createRequire(import.meta.url)(process.argv[2]);\n',
+      'const key = "getBuiltinModule"; const load = process[key]; load("node:module");\n',
+      'const processAlias = process; processAlias.getBuiltinModule("node:module");\n',
+      'globalThis.process.getBuiltinModule("node:module");\n',
+      'WebAssembly.instantiate(new Uint8Array());\n',
+      '(() => {}).constructor("return process")().getBuiltinModule("node:module");\n',
+      'eval("process.exit(0)");\n',
+      'new Function("process.exit(0)")();\n',
+    ]) {
+      const base = makeRepo();
+      const candidate = makeRepo();
+      populate(base);
+      populate(candidate);
+      write(base, "scripts/verify.mjs", source);
+      write(candidate, "scripts/verify.mjs", source);
+      expect(runTrustedContractCheck({ baseRepoRoot: base, candidateRepoRoot: candidate }).map((item) => item.rule))
+        .toEqual(["trusted-contract-config-invalid"]);
+    }
+  });
+
+  test("disables string code generation in the actual trusted checker child", () => {
+    for (const source of [
+      'const key = "con" + "structor"; const F = (() => {})[key]; F("return 42")(); process.exit(0);\n',
+      'const key = `con${"structor"}`; const { [key]: F } = (() => {}); F("return 42")(); process.exit(0);\n',
+      'const key = "con" + "structor"; const F = Reflect.get(() => {}, key); F("return 42")(); process.exit(0);\n',
+      'const key = "con" + "structor"; const F = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(() => {}), key).value; F("return 42")(); process.exit(0);\n',
+    ]) {
+      const base = makeRepo();
+      const candidate = makeRepo();
+      populate(base);
+      populate(candidate);
+      write(base, "scripts/verify.mjs", source);
+      write(candidate, "scripts/verify.mjs", source);
+
+      expect(runTrustedContractCheck({ baseRepoRoot: base, candidateRepoRoot: candidate }).map((item) => item.rule))
+        .toContain("trusted-contract-check-failed");
+    }
+  });
+
+  test("executes a trusted checker from an isolated immutable closure", () => {
+    const base = makeRepo();
+    const candidate = makeRepo();
+    populate(base);
+    populate(candidate);
+    const checker = `import { readFileSync } from "node:fs";
+if (readFileSync(new URL("./mutable.txt", import.meta.url), "utf8") !== "safe") process.exit(1);
+`;
+    write(base, "scripts/verify.mjs", checker);
+    write(candidate, "scripts/verify.mjs", checker);
+    write(base, "scripts/mutable.txt", "safe");
+    write(candidate, "scripts/mutable.txt", "safe");
+
+    const result = runTrustedContractCheck({ baseRepoRoot: base, candidateRepoRoot: candidate });
+    expect(result.map((item) => item.rule)).toContain("trusted-contract-check-failed");
+  });
+
+  test("required mode fails when the trusted base contract is absent", () => {
+    const base = makeRepo();
+    const candidate = makeRepo();
+    populate(candidate);
+
+    const result = runTrustedContractCheck({
+      baseRepoRoot: base,
+      candidateRepoRoot: candidate,
+      requireTrustedContract: true,
+    });
+    expect(result.map((item) => item.rule)).toEqual(["trusted-contract-base-missing"]);
+  });
+
+  test("allows optional bootstrap only when the contract path is truly absent", () => {
+    const candidate = makeRepo();
+
+    expect(runTrustedContractCheck({ candidateRepoRoot: candidate })).toEqual([]);
+  });
+
+  test("rejects present but invalid bootstrap contract paths", () => {
+    const invalidCandidates = [
+      () => {
+        const candidate = makeRepo();
+        write(candidate, ".github/ci-policy-contract.json", "");
+        return candidate;
+      },
+      () => {
+        const candidate = makeRepo();
+        write(candidate, ".github/ci-policy-contract.json", new Uint8Array(64 * 1024 + 1));
+        return candidate;
+      },
+      () => {
+        const candidate = makeRepo();
+        mkdirSync(path.join(candidate, ".github", "ci-policy-contract.json"), { recursive: true });
+        return candidate;
+      },
+      () => {
+        const target = makeRepo();
+        const candidate = makeRepo();
+        mkdirSync(path.join(candidate, ".github"), { recursive: true });
+        symlinkSync(
+          target,
+          path.join(candidate, ".github", "ci-policy-contract.json"),
+          process.platform === "win32" ? "junction" : "dir",
+        );
+        return candidate;
+      },
+      () => {
+        const target = makeRepo();
+        const candidate = makeRepo();
+        write(target, "ci-policy-contract.json", `${JSON.stringify(contract(), null, 2)}\n`);
+        symlinkSync(target, path.join(candidate, ".github"), process.platform === "win32" ? "junction" : "dir");
+        return candidate;
+      },
+    ];
+
+    for (const makeCandidate of invalidCandidates) {
+      const result = runTrustedContractCheck({ candidateRepoRoot: makeCandidate() });
+      expect(result.map((item) => item.rule)).toEqual(["trusted-contract-config-invalid"]);
+    }
+  });
+
+  test("never downgrades an invalid base or candidate contract to bootstrap or removal", () => {
+    const invalidBase = makeRepo();
+    const validCandidate = makeRepo();
+    write(invalidBase, ".github/ci-policy-contract.json", "");
+    populate(validCandidate);
+    expect(runTrustedContractCheck({ baseRepoRoot: invalidBase, candidateRepoRoot: validCandidate }).map((item) => item.rule))
+      .toEqual(["trusted-contract-config-invalid"]);
+
+    const validBase = makeRepo();
+    const invalidCandidate = makeRepo();
+    populate(validBase);
+    write(invalidCandidate, ".github/ci-policy-contract.json", "");
+    expect(runTrustedContractCheck({ baseRepoRoot: validBase, candidateRepoRoot: invalidCandidate }).map((item) => item.rule))
+      .toEqual(["trusted-contract-config-invalid"]);
+  });
+
+  test("reports a truly missing candidate contract as removed", () => {
+    const base = makeRepo();
+    const candidate = makeRepo();
+    populate(base);
+
+    expect(runTrustedContractCheck({ baseRepoRoot: base, candidateRepoRoot: candidate }).map((item) => item.rule))
+      .toEqual(["trusted-contract-config-removed"]);
+  });
+
+  test("rejects directory arguments in trusted contracts", () => {
+    const candidate = makeRepo();
+    populate(candidate);
+    const invalid = structuredClone(contract()) as any;
+    invalid.trusted_node_checks["candidate-data-v1"].arguments = [
+      { root: "candidate", path: ".", kind: "directory" },
+    ];
+    write(candidate, ".github/ci-policy-contract.json", `${JSON.stringify(invalid, null, 2)}\n`);
+
+    const result = runTrustedContractCheck({ candidateRepoRoot: candidate });
+    expect(result.map((item) => item.rule)).toEqual(["trusted-contract-config-invalid"]);
+  });
+
+  test("fails closed on duplicate keys, BOM, and unknown fields", () => {
+    for (const invalid of [
+      '{"schema_version":1,"schema_version":1,"immutable_files":[],"trusted_node_checks":{}}',
+      '\ufeff{"schema_version":1,"immutable_files":[],"trusted_node_checks":{}}',
+      '{"schema_version":1,"immutable_files":[],"trusted_node_checks":{},"extra":true}',
+      '{"schema_version":1.0000000000000001,"immutable_files":[],"trusted_node_checks":{}}',
+      '{"schema_version":9007199254740993,"immutable_files":[],"trusted_node_checks":{}}',
+    ]) {
+      const candidate = makeRepo();
+      write(candidate, ".github/ci-policy-contract.json", invalid);
+      const result = runTrustedContractCheck({ candidateRepoRoot: candidate });
+      expect(result.map((item) => item.rule)).toEqual(["trusted-contract-config-invalid"]);
+    }
+  });
+});

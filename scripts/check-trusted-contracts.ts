@@ -1,0 +1,827 @@
+import { spawnSync } from "node:child_process";
+import { parse } from "acorn";
+import {
+  constants as fsConstants,
+  copyFileSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+
+export type TrustedContractViolation = {
+  rule: string;
+  path: string;
+  message: string;
+};
+
+type ContractArgument = {
+  root: "base" | "candidate";
+  path: string;
+  kind: "file";
+};
+
+type TrustedNodeCheck = {
+  entrypoint: string;
+  arguments: ContractArgument[];
+};
+
+type TrustedContract = {
+  schema_version: 1;
+  immutable_files: string[];
+  trusted_node_checks: Record<string, TrustedNodeCheck>;
+};
+
+type CheckOptions = {
+  baseRepoRoot?: string;
+  candidateRepoRoot: string;
+  requireTrustedContract?: boolean;
+};
+
+type ContractPathState =
+  | { kind: "missing" }
+  | { kind: "invalid" }
+  | { kind: "valid"; path: string };
+
+type AstNode = {
+  type: string;
+  [key: string]: unknown;
+};
+
+const CONTRACT_PATH = ".github/ci-policy-contract.json";
+const MAX_CONFIG_BYTES = 64 * 1024;
+const MAX_IMMUTABLE_FILE_BYTES = 5 * 1024 * 1024;
+const MAX_IMMUTABLE_FILES = 64;
+const MAX_TRUSTED_CHECKS = 8;
+const MAX_CHECK_ARGUMENTS = 16;
+const CHECK_TIMEOUT_MS = 30_000;
+const TRUSTED_NODE_VERSION = "26.8.1";
+const CHECK_ID = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
+const ALLOWED_NODE_IMPORTS = new Set([
+  "node:crypto",
+  "node:fs",
+  "node:fs/promises",
+  "node:net",
+  "node:path",
+  "node:util",
+]);
+const FORBIDDEN_DYNAMIC_CALLEES = new Set([
+  "AsyncFunction",
+  "Function",
+  "GeneratorFunction",
+  "__proto__",
+  "_linkedBinding",
+  "binding",
+  "constructor",
+  "compileFunction",
+  "eval",
+  "getBuiltinModule",
+  "dlopen",
+  "prototype",
+  "require",
+  "runInContext",
+  "runInNewContext",
+  "runInThisContext",
+]);
+const FORBIDDEN_GLOBAL_IDENTIFIERS = new Set(["WebAssembly", "global", "globalThis"]);
+const ALLOWED_PROCESS_PROPERTIES = new Set(["argv", "env", "exit", "exitCode"]);
+
+export function runTrustedContractCheck(options: CheckOptions): TrustedContractViolation[] {
+  const candidateRoot = canonicalDirectory(options.candidateRepoRoot);
+  if (!candidateRoot) {
+    return [violation("trusted-contract-candidate-invalid", CONTRACT_PATH, "Candidate checkout is unavailable.")];
+  }
+
+  const candidateConfig = resolveContractPath(candidateRoot);
+  const baseRoot = options.baseRepoRoot ? canonicalDirectory(options.baseRepoRoot) : undefined;
+  const baseConfig: ContractPathState = baseRoot ? resolveContractPath(baseRoot) : { kind: "missing" };
+
+  if (baseConfig.kind === "invalid" || candidateConfig.kind === "invalid") {
+    return [violation("trusted-contract-config-invalid", CONTRACT_PATH, "Trusted contract path is invalid.")];
+  }
+
+  if (baseConfig.kind === "missing") {
+    if (options.requireTrustedContract) {
+      return [violation("trusted-contract-base-missing", CONTRACT_PATH, "Trusted base contract is required.")];
+    }
+    if (candidateConfig.kind === "missing") return [];
+    try {
+      const candidateContract = loadContract(candidateConfig.path);
+      validateContractSnapshot(candidateContract, candidateRoot);
+      if (Object.keys(candidateContract.trusted_node_checks).length !== 0) {
+        throw new Error("bootstrap trusted checks must be staged before activation");
+      }
+      return [];
+    } catch {
+      return [violation("trusted-contract-config-invalid", CONTRACT_PATH, "Bootstrap contract is invalid.")];
+    }
+  }
+
+  if (candidateConfig.kind === "missing") {
+    return [violation("trusted-contract-config-removed", CONTRACT_PATH, "Trusted contract was removed.")];
+  }
+
+  try {
+    const baseContract = loadContract(baseConfig.path);
+    const candidateContract = loadContract(candidateConfig.path);
+    validateContractSnapshot(baseContract, baseRoot!);
+    validateContractSnapshot(candidateContract, candidateRoot);
+    validateExecutionArguments(baseContract, baseRoot!, candidateRoot);
+
+    const violations: TrustedContractViolation[] = [];
+    validateContractEvolution(baseContract, candidateContract, candidateRoot, violations);
+    compareImmutableFiles(baseContract, baseRoot!, candidateRoot, violations);
+
+    if (violations.length === 0) {
+      runBaseChecks(baseContract, baseRoot!, baseRoot!, candidateRoot, violations);
+    }
+    if (violations.length === 0) {
+      // The candidate becomes the next trusted base. Use candidate's evolved check
+      // declarations, but execute only their already-immutable base module closure.
+      runBaseChecks(candidateContract, baseRoot!, candidateRoot, candidateRoot, violations);
+    }
+    return violations;
+  } catch {
+    return [violation("trusted-contract-config-invalid", CONTRACT_PATH, "Trusted contract input is invalid.")];
+  }
+}
+
+function loadContract(filePath: string): TrustedContract {
+  const bytes = readFileSync(filePath);
+  if (bytes.length === 0 || bytes.length > MAX_CONFIG_BYTES || hasUtf8Bom(bytes)) {
+    throw new Error("invalid contract bytes");
+  }
+  const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  const value = parseJsonRejectingDuplicateKeys(text);
+  validateContractSchema(value);
+  return value;
+}
+
+function validateContractSchema(value: unknown): asserts value is TrustedContract {
+  if (!isPlainObject(value) || !hasExactKeys(value, ["schema_version", "immutable_files", "trusted_node_checks"])) {
+    throw new Error("invalid contract object");
+  }
+  if (value.schema_version !== 1) throw new Error("unsupported contract schema");
+  if (!Array.isArray(value.immutable_files) || value.immutable_files.length > MAX_IMMUTABLE_FILES) {
+    throw new Error("invalid immutable file list");
+  }
+  const immutableFiles = value.immutable_files;
+  if (new Set(immutableFiles).size !== immutableFiles.length) {
+    throw new Error("duplicate immutable file");
+  }
+  for (const filePath of immutableFiles) assertSafeRelativePath(filePath, false);
+
+  if (!isPlainObject(value.trusted_node_checks)) throw new Error("invalid trusted checks");
+  const checkEntries = Object.entries(value.trusted_node_checks);
+  if (checkEntries.length > MAX_TRUSTED_CHECKS) throw new Error("too many trusted checks");
+  for (const [checkId, checkValue] of checkEntries) {
+    if (!CHECK_ID.test(checkId) || !isPlainObject(checkValue) || !hasExactKeys(checkValue, ["entrypoint", "arguments"])) {
+      throw new Error("invalid trusted check");
+    }
+    assertSafeRelativePath(checkValue.entrypoint, false);
+    if (!checkValue.entrypoint.endsWith(".mjs")) {
+      throw new Error("invalid trusted check entrypoint");
+    }
+    if (!immutableFiles.includes(checkValue.entrypoint)) {
+      throw new Error("trusted entrypoint must be immutable");
+    }
+    if (!Array.isArray(checkValue.arguments) || checkValue.arguments.length > MAX_CHECK_ARGUMENTS) {
+      throw new Error("invalid trusted check arguments");
+    }
+    const argumentPaths = new Set<string>();
+    for (const argument of checkValue.arguments) {
+      if (!isPlainObject(argument) || !hasExactKeys(argument, ["root", "path", "kind"])) {
+        throw new Error("invalid trusted check argument");
+      }
+      if (argument.root !== "base" && argument.root !== "candidate") {
+        throw new Error("invalid trusted check argument root");
+      }
+      if (argument.kind !== "file") {
+        throw new Error("invalid trusted check argument kind");
+      }
+      assertSafeRelativePath(argument.path, false);
+      const argumentPathKey = `${argument.root}/${argument.path}`.toLowerCase();
+      if (argumentPaths.has(argumentPathKey)) {
+        throw new Error("duplicate trusted check argument");
+      }
+      argumentPaths.add(argumentPathKey);
+    }
+  }
+}
+
+function validateContractSnapshot(contract: TrustedContract, snapshotRoot: string) {
+  for (const filePath of contract.immutable_files) {
+    if (!resolveInside(snapshotRoot, filePath, "file", MAX_IMMUTABLE_FILE_BYTES)) {
+      throw new Error("immutable file unavailable");
+    }
+  }
+  for (const check of Object.values(contract.trusted_node_checks)) {
+    if (!resolveInside(snapshotRoot, check.entrypoint, "file", MAX_IMMUTABLE_FILE_BYTES)) {
+      throw new Error("trusted entrypoint unavailable");
+    }
+    for (const argument of check.arguments) {
+      // Every merged snapshot must remain self-contained because established checks
+      // are append-only and this candidate becomes the trusted base of the next PR.
+      if (!resolveInside(snapshotRoot, argument.path, argument.kind, MAX_IMMUTABLE_FILE_BYTES)) {
+        throw new Error("trusted argument unavailable");
+      }
+    }
+    collectImmutableModuleClosure(contract, snapshotRoot, check.entrypoint);
+  }
+}
+
+function validateExecutionArguments(
+  contract: TrustedContract,
+  baseRoot: string,
+  candidateRoot: string,
+) {
+  for (const check of Object.values(contract.trusted_node_checks)) {
+    for (const argument of check.arguments) {
+      const argumentRoot = argument.root === "base" ? baseRoot : candidateRoot;
+      if (!resolveInside(argumentRoot, argument.path, argument.kind, MAX_IMMUTABLE_FILE_BYTES)) {
+        throw new Error("trusted execution argument unavailable");
+      }
+    }
+  }
+}
+
+function collectImmutableModuleClosure(
+  contract: TrustedContract,
+  repoRoot: string,
+  entrypoint: string,
+): Set<string> {
+  const immutableFiles = new Set(contract.immutable_files);
+  const visited = new Set<string>();
+  const visit = (modulePath: string) => {
+    if (visited.has(modulePath)) return;
+    if (!immutableFiles.has(modulePath)) throw new Error("trusted module dependency is not immutable");
+    visited.add(modulePath);
+    const absolutePath = resolveInside(repoRoot, modulePath, "file", MAX_IMMUTABLE_FILE_BYTES);
+    if (!absolutePath) throw new Error("trusted module dependency is unavailable");
+    const bytes = readFileSync(absolutePath);
+    if (hasUtf8Bom(bytes)) throw new Error("trusted module BOM is forbidden");
+    const source = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    for (const specifier of parseStaticModuleSpecifiers(source)) {
+      if (specifier.startsWith("node:")) {
+        if (!ALLOWED_NODE_IMPORTS.has(specifier)) {
+          throw new Error("trusted module builtin is not allowed");
+        }
+        continue;
+      }
+      if (!specifier.startsWith("./") && !specifier.startsWith("../")) {
+        throw new Error("trusted module package imports are forbidden");
+      }
+      if (specifier.includes("%") || specifier.includes("?") || specifier.includes("#") || specifier.includes("\\")) {
+        throw new Error("trusted module import URL syntax is forbidden");
+      }
+      const dependencyPath = path.posix.normalize(path.posix.join(path.posix.dirname(modulePath), specifier));
+      assertSafeRelativePath(dependencyPath, false);
+      if (!dependencyPath.endsWith(".mjs")) {
+        throw new Error("trusted module imports must use the mjs extension");
+      }
+      visit(dependencyPath);
+    }
+  };
+  visit(entrypoint);
+  return visited;
+}
+
+function parseStaticModuleSpecifiers(source: string): string[] {
+  const program = parse(source, {
+    ecmaVersion: "latest",
+    sourceType: "module",
+  }) as unknown as AstNode;
+  const specifiers: string[] = [];
+
+  const readSource = (value: unknown): string => {
+    if (!isAstNode(value) || value.type !== "Literal" || typeof value.value !== "string") {
+      throw new Error("trusted module import is invalid");
+    }
+    return value.value;
+  };
+
+  const visit = (value: unknown, parent?: AstNode) => {
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item, parent);
+      return;
+    }
+    if (!isAstNode(value)) return;
+
+    if (value.type === "ImportExpression") {
+      throw new Error("dynamic trusted module loading is forbidden");
+    }
+    if (value.type === "Identifier"
+      && typeof value.name === "string"
+      && FORBIDDEN_DYNAMIC_CALLEES.has(value.name)) {
+      throw new Error("dynamic trusted module loading is forbidden");
+    }
+    if (value.type === "Identifier"
+      && typeof value.name === "string"
+      && FORBIDDEN_GLOBAL_IDENTIFIERS.has(value.name)) {
+      throw new Error("dynamic global access is forbidden");
+    }
+    if (value.type === "Identifier"
+      && value.name === "process"
+      && !isAllowedProcessReference(value, parent)) {
+      throw new Error("indirect process access is forbidden");
+    }
+    if (value.type === "MemberExpression" && hasForbiddenMemberProperty(value)) {
+      throw new Error("dynamic trusted module loading is forbidden");
+    }
+    if ((value.type === "CallExpression" || value.type === "NewExpression")
+      && isForbiddenDynamicCallee(value.callee)) {
+      throw new Error("dynamic trusted module loading is forbidden");
+    }
+    if (value.type === "ImportDeclaration"
+      || value.type === "ExportNamedDeclaration"
+      || value.type === "ExportAllDeclaration") {
+      if (value.source !== null && value.source !== undefined) {
+        specifiers.push(readSource(value.source));
+      }
+    }
+
+    for (const [key, child] of Object.entries(value)) {
+      if (key !== "start" && key !== "end" && key !== "loc" && key !== "range") visit(child, value);
+    }
+  };
+
+  visit(program);
+  return specifiers;
+}
+
+function isAstNode(value: unknown): value is AstNode {
+  return value !== null
+    && typeof value === "object"
+    && !Array.isArray(value)
+    && typeof (value as { type?: unknown }).type === "string";
+}
+
+function isForbiddenDynamicCallee(value: unknown): boolean {
+  if (!isAstNode(value)) return false;
+  if (value.type === "Identifier" && typeof value.name === "string") {
+    return FORBIDDEN_DYNAMIC_CALLEES.has(value.name);
+  }
+  return value.type === "MemberExpression" && hasForbiddenMemberProperty(value);
+}
+
+function hasForbiddenMemberProperty(value: AstNode): boolean {
+  if (value.type !== "MemberExpression") return false;
+  const property = value.property;
+  if (!isAstNode(property)) return false;
+  if (!value.computed && property.type === "Identifier" && typeof property.name === "string") {
+    return FORBIDDEN_DYNAMIC_CALLEES.has(property.name);
+  }
+  if (value.computed && property.type === "Literal" && typeof property.value === "string") {
+    return FORBIDDEN_DYNAMIC_CALLEES.has(property.value);
+  }
+  return false;
+}
+
+function isAllowedProcessReference(value: AstNode, parent?: AstNode): boolean {
+  if (!parent || parent.type !== "MemberExpression" || parent.object !== value || parent.computed !== false) {
+    return false;
+  }
+  const property = parent.property;
+  return isAstNode(property)
+    && property.type === "Identifier"
+    && typeof property.name === "string"
+    && ALLOWED_PROCESS_PROPERTIES.has(property.name);
+}
+
+function validateContractEvolution(
+  baseContract: TrustedContract,
+  candidateContract: TrustedContract,
+  candidateRoot: string,
+  violations: TrustedContractViolation[],
+) {
+  const candidateFiles = new Set(candidateContract.immutable_files);
+  for (const filePath of baseContract.immutable_files) {
+    if (!candidateFiles.has(filePath)) {
+      violations.push(violation("trusted-contract-weakened", CONTRACT_PATH, "An immutable file rule was removed."));
+    }
+  }
+  for (const [checkId, baseCheck] of Object.entries(baseContract.trusted_node_checks)) {
+    const candidateCheck = candidateContract.trusted_node_checks[checkId];
+    if (!candidateCheck || stableJson(candidateCheck) !== stableJson(baseCheck)) {
+      violations.push(violation("trusted-contract-weakened", CONTRACT_PATH, "A trusted check was removed or changed."));
+    }
+  }
+  for (const [checkId, candidateCheck] of Object.entries(candidateContract.trusted_node_checks)) {
+    if (!Object.hasOwn(baseContract.trusted_node_checks, checkId)) {
+      const candidateClosure = collectImmutableModuleClosure(
+        candidateContract,
+        candidateRoot,
+        candidateCheck.entrypoint,
+      );
+      const baseImmutableFiles = new Set(baseContract.immutable_files);
+      if ([...candidateClosure].every((filePath) => baseImmutableFiles.has(filePath))) continue;
+      violations.push(
+        violation(
+          "trusted-contract-check-not-staged",
+          CONTRACT_PATH,
+          "A new trusted check and its local dependency closure must be immutable in the base before activation.",
+        ),
+      );
+    }
+  }
+}
+
+function compareImmutableFiles(
+  contract: TrustedContract,
+  baseRoot: string,
+  candidateRoot: string,
+  violations: TrustedContractViolation[],
+) {
+  for (const filePath of contract.immutable_files) {
+    const basePath = resolveInside(baseRoot, filePath, "file", MAX_IMMUTABLE_FILE_BYTES);
+    const candidatePath = resolveInside(candidateRoot, filePath, "file", MAX_IMMUTABLE_FILE_BYTES);
+    if (!basePath || !candidatePath || !readFileSync(basePath).equals(readFileSync(candidatePath))) {
+      violations.push(
+        violation("trusted-contract-immutable-file-changed", filePath, "An immutable file was removed or changed."),
+      );
+    }
+  }
+}
+
+function runBaseChecks(
+  contract: TrustedContract,
+  programRoot: string,
+  baseInputRoot: string,
+  candidateInputRoot: string,
+  violations: TrustedContractViolation[],
+) {
+  const trustedNodeExecutable = resolveTrustedNodeExecutable();
+  if (!trustedNodeExecutable) {
+    violations.push(
+      violation(
+        "trusted-contract-runtime-invalid",
+        CONTRACT_PATH,
+        `Trusted checks require Node ${TRUSTED_NODE_VERSION}.`,
+      ),
+    );
+    return;
+  }
+  for (const [checkId, check] of Object.entries(contract.trusted_node_checks)) {
+    let isolatedRoot: string | undefined;
+    let entrypoint: string | undefined;
+    try {
+      isolatedRoot = stageTrustedModuleClosure(contract, programRoot, check.entrypoint);
+      entrypoint = resolveInside(
+        path.join(isolatedRoot, "program"),
+        check.entrypoint,
+        "file",
+        MAX_IMMUTABLE_FILE_BYTES,
+      );
+    } catch {
+      entrypoint = undefined;
+    }
+    if (!isolatedRoot || !entrypoint) {
+      if (isolatedRoot) rmSync(isolatedRoot, { force: true, recursive: true });
+      violations.push(violation("trusted-contract-check-unavailable", CONTRACT_PATH, "A trusted check is unavailable."));
+      continue;
+    }
+    const args: string[] = [];
+    let valid = true;
+    try {
+      for (const argument of check.arguments) {
+        const argumentRoot = argument.root === "base" ? baseInputRoot : candidateInputRoot;
+        const resolved = resolveInside(argumentRoot, argument.path, argument.kind, MAX_IMMUTABLE_FILE_BYTES);
+        if (!resolved) {
+          valid = false;
+          break;
+        }
+        const isolatedArgument = path.join(
+          isolatedRoot,
+          "inputs",
+          argument.root,
+          ...argument.path.split("/"),
+        );
+        mkdirSync(path.dirname(isolatedArgument), { recursive: true });
+        copyFileSync(resolved, isolatedArgument, fsConstants.COPYFILE_EXCL);
+        args.push(realpathSync(isolatedArgument));
+      }
+    } catch {
+      valid = false;
+    }
+    if (!valid) {
+      rmSync(isolatedRoot, { force: true, recursive: true });
+      violations.push(violation("trusted-contract-check-input-invalid", CONTRACT_PATH, "A trusted check input is unavailable."));
+      continue;
+    }
+
+    try {
+      const childArguments = [
+        "--permission",
+        "--disallow-code-generation-from-strings",
+        `--allow-fs-read=${isolatedRoot}`,
+        entrypoint,
+        ...args,
+      ];
+      const result = spawnSync(trustedNodeExecutable, childArguments, {
+        cwd: isolatedRoot,
+        encoding: "utf8",
+        env: restrictedEnvironment(),
+        maxBuffer: 64 * 1024,
+        stdio: "ignore",
+        timeout: CHECK_TIMEOUT_MS,
+        windowsHide: true,
+      });
+      if (result.error || result.signal || result.status !== 0) {
+        violations.push(
+          violation("trusted-contract-check-failed", CONTRACT_PATH, `Trusted check ${checkId} failed.`),
+        );
+      }
+    } finally {
+      rmSync(isolatedRoot, { force: true, recursive: true });
+    }
+  }
+}
+
+function resolveTrustedNodeExecutable(): string | undefined {
+  const executable = process.versions.bun
+    ? process.env.CI_POLICY_TRUSTED_NODE ?? "node"
+    : process.execPath;
+  try {
+    const probe = spawnSync(executable, ["--version"], {
+      encoding: "utf8",
+      env: restrictedEnvironment(),
+      maxBuffer: 1024,
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 5_000,
+      windowsHide: true,
+    });
+    if (probe.error || probe.signal || probe.status !== 0) return undefined;
+    return probe.stdout.trim() === `v${TRUSTED_NODE_VERSION}` ? executable : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function stageTrustedModuleClosure(
+  contract: TrustedContract,
+  baseRoot: string,
+  entrypoint: string,
+): string {
+  const isolatedRoot = mkdtempSync(path.join(tmpdir(), "ci-policy-trusted-"));
+  try {
+    const closure = collectImmutableModuleClosure(contract, baseRoot, entrypoint);
+    for (const modulePath of closure) {
+      const source = resolveInside(baseRoot, modulePath, "file", MAX_IMMUTABLE_FILE_BYTES);
+      if (!source) throw new Error("trusted module dependency is unavailable");
+      const destination = path.join(isolatedRoot, "program", ...modulePath.split("/"));
+      mkdirSync(path.dirname(destination), { recursive: true });
+      copyFileSync(source, destination, fsConstants.COPYFILE_EXCL);
+    }
+    return isolatedRoot;
+  } catch (error) {
+    rmSync(isolatedRoot, { force: true, recursive: true });
+    throw error;
+  }
+}
+
+function restrictedEnvironment(): NodeJS.ProcessEnv {
+  const permitted = ["PATH", "Path", "PATHEXT", "SYSTEMROOT", "WINDIR", "TMP", "TEMP", "TMPDIR", "LANG", "LC_ALL"];
+  const env: NodeJS.ProcessEnv = { CI: "true" };
+  for (const key of permitted) {
+    if (process.env[key] !== undefined) env[key] = process.env[key];
+  }
+  return env;
+}
+
+function canonicalDirectory(root: string): string | undefined {
+  try {
+    const metadata = lstatSync(root);
+    if (!metadata.isDirectory() || metadata.isSymbolicLink()) return undefined;
+    return realpathSync(root);
+  } catch {
+    return undefined;
+  }
+}
+
+function resolveContractPath(root: string): ContractPathState {
+  let current = root;
+  const segments = CONTRACT_PATH.split("/");
+  for (const [index, segment] of segments.entries()) {
+    current = path.join(current, segment);
+    try {
+      const metadata = lstatSync(current);
+      if (metadata.isSymbolicLink()) return { kind: "invalid" };
+      const isLast = index === segments.length - 1;
+      if (!isLast && !metadata.isDirectory()) return { kind: "invalid" };
+      if (isLast && (!metadata.isFile() || metadata.size <= 0 || metadata.size > MAX_CONFIG_BYTES)) {
+        return { kind: "invalid" };
+      }
+    } catch (error) {
+      if (isNodeError(error) && error.code === "ENOENT") return { kind: "missing" };
+      return { kind: "invalid" };
+    }
+  }
+  try {
+    const canonicalPath = realpathSync(current);
+    const relative = path.relative(root, canonicalPath);
+    if (relative.startsWith(`..${path.sep}`) || relative === ".." || path.isAbsolute(relative)) {
+      return { kind: "invalid" };
+    }
+    return { kind: "valid", path: canonicalPath };
+  } catch {
+    return { kind: "invalid" };
+  }
+}
+
+function resolveInside(
+  root: string,
+  relativePath: string,
+  kind: "file" | "directory",
+  maxBytes: number,
+): string | undefined {
+  try {
+    assertSafeRelativePath(relativePath, kind === "directory");
+    const lexicalPath = relativePath === "." ? root : path.join(root, ...relativePath.split("/"));
+    if (hasSymlinkComponent(root, relativePath)) return undefined;
+    const metadata = lstatSync(lexicalPath);
+    if (metadata.isSymbolicLink()) return undefined;
+    if (kind === "file" && (!metadata.isFile() || metadata.size <= 0 || metadata.size > maxBytes)) return undefined;
+    if (kind === "directory" && !metadata.isDirectory()) return undefined;
+    const canonicalPath = realpathSync(lexicalPath);
+    const relative = path.relative(root, canonicalPath);
+    if (relative.startsWith(`..${path.sep}`) || relative === ".." || path.isAbsolute(relative)) return undefined;
+    return canonicalPath;
+  } catch {
+    return undefined;
+  }
+}
+
+function hasSymlinkComponent(root: string, relativePath: string): boolean {
+  if (relativePath === ".") return false;
+  let current = root;
+  for (const segment of relativePath.split("/")) {
+    current = path.join(current, segment);
+    if (lstatSync(current).isSymbolicLink()) return true;
+  }
+  return false;
+}
+
+function assertSafeRelativePath(value: unknown, allowDot: boolean): asserts value is string {
+  if (typeof value !== "string" || value.length === 0 || value.length > 240 || value.includes("\\")) {
+    throw new Error("invalid relative path");
+  }
+  if (allowDot && value === ".") return;
+  if (value.startsWith("/") || value.endsWith("/") || value.includes("//")) {
+    throw new Error("invalid relative path");
+  }
+  const segments = value.split("/");
+  if (segments.some((segment) => segment === "" || segment === "." || segment === ".." || /[\u0000-\u001f]/.test(segment))) {
+    throw new Error("invalid relative path");
+  }
+}
+
+function hasUtf8Bom(bytes: Uint8Array): boolean {
+  return bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf;
+}
+
+function hasExactKeys(value: Record<string, unknown>, expected: string[]): boolean {
+  return stableJson(Object.keys(value).sort()) === stableJson([...expected].sort());
+}
+
+function isPlainObject(value: unknown): value is Record<string, any> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function isNodeError(value: unknown): value is NodeJS.ErrnoException {
+  return value instanceof Error && "code" in value;
+}
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (isPlainObject(value)) {
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function violation(rule: string, violationPath: string, message: string): TrustedContractViolation {
+  return { rule, path: violationPath, message };
+}
+
+function parseJsonRejectingDuplicateKeys(raw: string): unknown {
+  let index = 0;
+  const fail = () => {
+    throw new SyntaxError("invalid JSON");
+  };
+  const skipWhitespace = () => {
+    while (index < raw.length && /[\t\n\r ]/.test(raw[index])) index += 1;
+  };
+  const readStringToken = () => {
+    const start = index;
+    if (raw[index] !== '"') fail();
+    index += 1;
+    while (index < raw.length) {
+      const code = raw.charCodeAt(index);
+      if (code === 0x22) {
+        index += 1;
+        return raw.slice(start, index);
+      }
+      if (code === 0x5c) {
+        index += 1;
+        if (index >= raw.length) fail();
+        const escape = raw[index];
+        if (escape === "u") {
+          if (!/^[0-9a-fA-F]{4}$/.test(raw.slice(index + 1, index + 5))) fail();
+          index += 5;
+        } else if ('"\\/bfnrt'.includes(escape)) {
+          index += 1;
+        } else {
+          fail();
+        }
+        continue;
+      }
+      if (code < 0x20) fail();
+      index += 1;
+    }
+    fail();
+  };
+  const readLiteral = (literal: string) => {
+    if (raw.slice(index, index + literal.length) !== literal) fail();
+    index += literal.length;
+  };
+  const readNumber = () => {
+    const match = /-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?/y;
+    match.lastIndex = index;
+    const result = match.exec(raw);
+    if (!result) fail();
+    const parsed = Number(result[0]);
+    if (!Number.isSafeInteger(parsed) || String(parsed) !== result[0]) fail();
+    index = match.lastIndex;
+  };
+  const readValue = () => {
+    skipWhitespace();
+    if (index >= raw.length) fail();
+    const token = raw[index];
+    if (token === '"') return void readStringToken();
+    if (token === "{") {
+      index += 1;
+      skipWhitespace();
+      const keys = new Set<string>();
+      if (raw[index] === "}") {
+        index += 1;
+        return;
+      }
+      while (index < raw.length) {
+        skipWhitespace();
+        const key = JSON.parse(readStringToken()) as string;
+        if (keys.has(key)) fail();
+        keys.add(key);
+        skipWhitespace();
+        if (raw[index] !== ":") fail();
+        index += 1;
+        readValue();
+        skipWhitespace();
+        if (raw[index] === "}") {
+          index += 1;
+          return;
+        }
+        if (raw[index] !== ",") fail();
+        index += 1;
+      }
+      fail();
+    }
+    if (token === "[") {
+      index += 1;
+      skipWhitespace();
+      if (raw[index] === "]") {
+        index += 1;
+        return;
+      }
+      while (index < raw.length) {
+        readValue();
+        skipWhitespace();
+        if (raw[index] === "]") {
+          index += 1;
+          return;
+        }
+        if (raw[index] !== ",") fail();
+        index += 1;
+      }
+      fail();
+    }
+    if (token === "t") return readLiteral("true");
+    if (token === "f") return readLiteral("false");
+    if (token === "n") return readLiteral("null");
+    if (token === "-" || /[0-9]/.test(token)) return readNumber();
+    fail();
+  };
+
+  readValue();
+  skipWhitespace();
+  if (index !== raw.length) fail();
+  return JSON.parse(raw);
+}

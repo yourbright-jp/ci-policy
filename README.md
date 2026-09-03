@@ -93,11 +93,12 @@ base 版だけを読みます。同じ PR で追加した例外による自己�
 
 契約は追記のみ可能です。既存の immutable file / trusted check は削除・変更できません。
 candidate directoryは渡せず、列挙したregular fileだけを引数にできます。entrypointの静的な
-local import closureもすべてimmutable fileへ含め、bare package / dynamic import / requireは拒否します。
+local import closureはAcornで構文解析し、すべてimmutable fileへ含めます。bare package、dynamic
+import、require、percent/query/fragmentを含むURL型specifierは拒否します。
 
 新checkerは2段階で有効化します。最初のPRでは実装と依存closureをimmutable fileとして追加し、
-次のPRでtrusted checkを追加します。entrypointがすでにbaseでimmutableでなければactivationは
-失敗し、activation PRでもcandidate codeは実行しません。
+次のPRでtrusted checkを追加します。entrypointとlocal dependency closureの全体がすでにbaseで
+immutableでなければactivationは失敗し、activation PRでもcandidate codeは実行しません。
 
 初回 bootstrap PR は必ず人手で内容を確認し、merge後にrulesetを有効化します。中央source
 workflowはbase契約がない対象をfail closedにするため、bootstrap前に有効化してはいけません。

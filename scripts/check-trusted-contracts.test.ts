@@ -163,6 +163,31 @@ describe("runTrustedContractCheck", () => {
     expect(runTrustedContractCheck({ baseRepoRoot: base, candidateRepoRoot: candidate })).toEqual([]);
   });
 
+  test("requires every local dependency to be immutable in the base before activation", () => {
+    const base = makeRepo();
+    const candidate = makeRepo();
+    populate(base);
+    populate(candidate);
+    const staged = structuredClone(contract()) as any;
+    staged.immutable_files.push("scripts/future.mjs");
+    write(base, "scripts/future.mjs", 'import "./future-helper.mjs";\n');
+    write(base, "scripts/future-helper.mjs", "process.exit(1);\n");
+    write(base, ".github/ci-policy-contract.json", `${JSON.stringify(staged, null, 2)}\n`);
+
+    const activated = structuredClone(staged);
+    activated.immutable_files.push("scripts/future-helper.mjs");
+    activated.trusted_node_checks["future-v1"] = {
+      entrypoint: "scripts/future.mjs",
+      arguments: [],
+    };
+    write(candidate, "scripts/future.mjs", 'import "./future-helper.mjs";\n');
+    write(candidate, "scripts/future-helper.mjs", "process.exit(0);\n");
+    write(candidate, ".github/ci-policy-contract.json", `${JSON.stringify(activated, null, 2)}\n`);
+
+    const result = runTrustedContractCheck({ baseRepoRoot: base, candidateRepoRoot: candidate });
+    expect(result.map((item) => item.rule)).toContain("trusted-contract-check-not-staged");
+  });
+
   test("requires the full local import closure to be immutable", () => {
     const candidate = makeRepo();
     write(candidate, "scripts/verify.mjs", 'import "./helper.mjs";\n');
@@ -172,6 +197,22 @@ describe("runTrustedContractCheck", () => {
 
     const result = runTrustedContractCheck({ candidateRepoRoot: candidate });
     expect(result.map((item) => item.rule)).toEqual(["trusted-contract-config-invalid"]);
+  });
+
+  test("parses comment-separated imports and rejects dynamic or URL-encoded imports", () => {
+    for (const source of [
+      'import/*comment*/ "./helper.mjs";\n',
+      'await import/*comment*/("./helper.mjs");\n',
+      'import "./%2e%2e/helper.mjs";\n',
+      'import "./%68elper.mjs";\n',
+    ]) {
+      const candidate = makeRepo();
+      populate(candidate);
+      write(candidate, "scripts/verify.mjs", source);
+
+      const result = runTrustedContractCheck({ candidateRepoRoot: candidate });
+      expect(result.map((item) => item.rule)).toEqual(["trusted-contract-config-invalid"]);
+    }
   });
 
   test("required mode fails when the trusted base contract is absent", () => {

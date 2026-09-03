@@ -76,8 +76,8 @@ v6 は pull request / merge group / main push の base を別 checkout し、対
 - base 契約にある trusted check は変更・削除禁止
 - trusted check は base の entrypoint のみを、secret を除いた環境で実行
 - candidate directoryは渡さず、列挙したregular fileだけを引数にする
-- entrypointの静的なlocal import closureはすべてimmutable fileに含め、package/dynamic loaderを拒否
-- 新checkerは実装をimmutable化するPRとcheckを追加するPRの2段階で有効化し、どちらもcandidate codeを実行しない
+- entrypointの静的なlocal import closureはAcornで構文解析し、すべてimmutable fileに含め、package/dynamic loaderとURL型specifierを拒否
+- 新checkerは実装と全local dependency closureをimmutable化するPRとcheckを追加するPRの2段階で有効化し、どちらもcandidate codeを実行しない
 - config / file / argument は closed schema、fatal UTF-8、BOM・duplicate key・symlink・escape・過大入力拒否
 
 契約を caller workflow から独立して強制する場合は、組織 ruleset の

@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { parse } from "acorn";
 import {
   existsSync,
   lstatSync,
@@ -34,6 +35,11 @@ type CheckOptions = {
   baseRepoRoot?: string;
   candidateRepoRoot: string;
   requireTrustedContract?: boolean;
+};
+
+type AstNode = {
+  type: string;
+  [key: string]: unknown;
 };
 
 const CONTRACT_PATH = ".github/ci-policy-contract.json";
@@ -82,7 +88,7 @@ export function runTrustedContractCheck(options: CheckOptions): TrustedContractV
     validateContractFiles(candidateContract, candidateRoot);
 
     const violations: TrustedContractViolation[] = [];
-    validateContractEvolution(baseContract, candidateContract, violations);
+    validateContractEvolution(baseContract, candidateContract, candidateRoot, violations);
     compareImmutableFiles(baseContract, baseRoot!, candidateRoot, violations);
 
     if (violations.length === 0) {
@@ -166,15 +172,15 @@ function validateContractFiles(contract: TrustedContract, repoRoot: string) {
         throw new Error("trusted argument unavailable");
       }
     }
-    validateImmutableModuleClosure(contract, repoRoot, check.entrypoint);
+    collectImmutableModuleClosure(contract, repoRoot, check.entrypoint);
   }
 }
 
-function validateImmutableModuleClosure(
+function collectImmutableModuleClosure(
   contract: TrustedContract,
   repoRoot: string,
   entrypoint: string,
-) {
+): Set<string> {
   const immutableFiles = new Set(contract.immutable_files);
   const visited = new Set<string>();
   const visit = (modulePath: string) => {
@@ -186,15 +192,13 @@ function validateImmutableModuleClosure(
     const bytes = readFileSync(absolutePath);
     if (hasUtf8Bom(bytes)) throw new Error("trusted module BOM is forbidden");
     const source = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-    if (/\bimport\s*\(|\brequire\s*\(/.test(source)) {
-      throw new Error("dynamic trusted module loading is forbidden");
-    }
-    const imports = /\b(?:import|export)\s+(?:[^'";]*?\sfrom\s*)?["']([^"']+)["']/g;
-    for (const match of source.matchAll(imports)) {
-      const specifier = match[1];
+    for (const specifier of parseStaticModuleSpecifiers(source)) {
       if (specifier.startsWith("node:")) continue;
       if (!specifier.startsWith("./") && !specifier.startsWith("../")) {
         throw new Error("trusted module package imports are forbidden");
+      }
+      if (specifier.includes("%") || specifier.includes("?") || specifier.includes("#") || specifier.includes("\\")) {
+        throw new Error("trusted module import URL syntax is forbidden");
       }
       const dependencyPath = path.posix.normalize(path.posix.join(path.posix.dirname(modulePath), specifier));
       assertSafeRelativePath(dependencyPath, false);
@@ -205,11 +209,67 @@ function validateImmutableModuleClosure(
     }
   };
   visit(entrypoint);
+  return visited;
+}
+
+function parseStaticModuleSpecifiers(source: string): string[] {
+  const program = parse(source, {
+    ecmaVersion: "latest",
+    sourceType: "module",
+  }) as unknown as AstNode;
+  const specifiers: string[] = [];
+
+  const readSource = (value: unknown): string => {
+    if (!isAstNode(value) || value.type !== "Literal" || typeof value.value !== "string") {
+      throw new Error("trusted module import is invalid");
+    }
+    return value.value;
+  };
+
+  const visit = (value: unknown) => {
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item);
+      return;
+    }
+    if (!isAstNode(value)) return;
+
+    if (value.type === "ImportExpression") {
+      throw new Error("dynamic trusted module loading is forbidden");
+    }
+    if (value.type === "CallExpression"
+      && isAstNode(value.callee)
+      && value.callee.type === "Identifier"
+      && value.callee.name === "require") {
+      throw new Error("dynamic trusted module loading is forbidden");
+    }
+    if (value.type === "ImportDeclaration"
+      || value.type === "ExportNamedDeclaration"
+      || value.type === "ExportAllDeclaration") {
+      if (value.source !== null && value.source !== undefined) {
+        specifiers.push(readSource(value.source));
+      }
+    }
+
+    for (const [key, child] of Object.entries(value)) {
+      if (key !== "start" && key !== "end" && key !== "loc" && key !== "range") visit(child);
+    }
+  };
+
+  visit(program);
+  return specifiers;
+}
+
+function isAstNode(value: unknown): value is AstNode {
+  return value !== null
+    && typeof value === "object"
+    && !Array.isArray(value)
+    && typeof (value as { type?: unknown }).type === "string";
 }
 
 function validateContractEvolution(
   baseContract: TrustedContract,
   candidateContract: TrustedContract,
+  candidateRoot: string,
   violations: TrustedContractViolation[],
 ) {
   const candidateFiles = new Set(candidateContract.immutable_files);
@@ -225,13 +285,19 @@ function validateContractEvolution(
     }
   }
   for (const [checkId, candidateCheck] of Object.entries(candidateContract.trusted_node_checks)) {
-    if (!Object.hasOwn(baseContract.trusted_node_checks, checkId)
-      && !baseContract.immutable_files.includes(candidateCheck.entrypoint)) {
+    if (!Object.hasOwn(baseContract.trusted_node_checks, checkId)) {
+      const candidateClosure = collectImmutableModuleClosure(
+        candidateContract,
+        candidateRoot,
+        candidateCheck.entrypoint,
+      );
+      const baseImmutableFiles = new Set(baseContract.immutable_files);
+      if ([...candidateClosure].every((filePath) => baseImmutableFiles.has(filePath))) continue;
       violations.push(
         violation(
           "trusted-contract-check-not-staged",
           CONTRACT_PATH,
-          "A new trusted check entrypoint must be immutable in the base before activation.",
+          "A new trusted check and its local dependency closure must be immutable in the base before activation.",
         ),
       );
     }

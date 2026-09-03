@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { parse } from "acorn";
 import {
+  constants as fsConstants,
   copyFileSync,
   existsSync,
   lstatSync,
@@ -54,6 +55,7 @@ const MAX_IMMUTABLE_FILES = 64;
 const MAX_TRUSTED_CHECKS = 8;
 const MAX_CHECK_ARGUMENTS = 16;
 const CHECK_TIMEOUT_MS = 30_000;
+const TRUSTED_NODE_VERSION = "26.8.1";
 const CHECK_ID = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
 const FORBIDDEN_NODE_IMPORTS = new Set([
   "node:child_process",
@@ -165,6 +167,7 @@ function validateContractSchema(value: unknown): asserts value is TrustedContrac
     if (!Array.isArray(checkValue.arguments) || checkValue.arguments.length > MAX_CHECK_ARGUMENTS) {
       throw new Error("invalid trusted check arguments");
     }
+    const argumentPaths = new Set<string>();
     for (const argument of checkValue.arguments) {
       if (!isPlainObject(argument) || !hasExactKeys(argument, ["root", "path", "kind"])) {
         throw new Error("invalid trusted check argument");
@@ -176,6 +179,11 @@ function validateContractSchema(value: unknown): asserts value is TrustedContrac
         throw new Error("invalid trusted check argument kind");
       }
       assertSafeRelativePath(argument.path, false);
+      const argumentPathKey = `${argument.root}/${argument.path}`.toLowerCase();
+      if (argumentPaths.has(argumentPathKey)) {
+        throw new Error("duplicate trusted check argument");
+      }
+      argumentPaths.add(argumentPathKey);
     }
   }
 }
@@ -375,12 +383,27 @@ function runBaseChecks(
   candidateRoot: string,
   violations: TrustedContractViolation[],
 ) {
+  if (!process.versions.bun && process.versions.node !== TRUSTED_NODE_VERSION) {
+    violations.push(
+      violation(
+        "trusted-contract-runtime-invalid",
+        CONTRACT_PATH,
+        `Trusted checks require Node ${TRUSTED_NODE_VERSION}.`,
+      ),
+    );
+    return;
+  }
   for (const [checkId, check] of Object.entries(contract.trusted_node_checks)) {
     let isolatedRoot: string | undefined;
     let entrypoint: string | undefined;
     try {
       isolatedRoot = stageTrustedModuleClosure(contract, baseRoot, check.entrypoint);
-      entrypoint = resolveInside(isolatedRoot, check.entrypoint, "file", MAX_IMMUTABLE_FILE_BYTES);
+      entrypoint = resolveInside(
+        path.join(isolatedRoot, "program"),
+        check.entrypoint,
+        "file",
+        MAX_IMMUTABLE_FILE_BYTES,
+      );
     } catch {
       entrypoint = undefined;
     }
@@ -406,7 +429,7 @@ function runBaseChecks(
           ...argument.path.split("/"),
         );
         mkdirSync(path.dirname(isolatedArgument), { recursive: true });
-        copyFileSync(resolved, isolatedArgument);
+        copyFileSync(resolved, isolatedArgument, fsConstants.COPYFILE_EXCL);
         args.push(realpathSync(isolatedArgument));
       }
     } catch {
@@ -453,9 +476,9 @@ function stageTrustedModuleClosure(
     for (const modulePath of closure) {
       const source = resolveInside(baseRoot, modulePath, "file", MAX_IMMUTABLE_FILE_BYTES);
       if (!source) throw new Error("trusted module dependency is unavailable");
-      const destination = path.join(isolatedRoot, ...modulePath.split("/"));
+      const destination = path.join(isolatedRoot, "program", ...modulePath.split("/"));
       mkdirSync(path.dirname(destination), { recursive: true });
-      copyFileSync(source, destination);
+      copyFileSync(source, destination, fsConstants.COPYFILE_EXCL);
     }
     return isolatedRoot;
   } catch (error) {

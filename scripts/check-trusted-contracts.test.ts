@@ -90,6 +90,49 @@ if (!input.includes("/inputs/candidate/data/state.txt") || readFileSync(input, "
     expect(runTrustedContractCheck({ baseRepoRoot: base, candidateRepoRoot: candidate })).toEqual([]);
   });
 
+  test("keeps staged inputs disjoint from the immutable program tree", () => {
+    const base = makeRepo();
+    const candidate = makeRepo();
+    const collisionContract = {
+      schema_version: 1,
+      immutable_files: ["inputs/candidate/data/state.mjs"],
+      trusted_node_checks: {
+        "collision-v1": {
+          entrypoint: "inputs/candidate/data/state.mjs",
+          arguments: [{ root: "candidate", path: "data/state.mjs", kind: "file" }],
+        },
+      },
+    };
+    const checker = `import { readFileSync } from "node:fs";
+if (readFileSync(process.argv[2], "utf8") !== "candidate data") process.exit(1);
+`;
+    for (const root of [base, candidate]) {
+      write(root, "inputs/candidate/data/state.mjs", checker);
+      write(root, ".github/ci-policy-contract.json", `${JSON.stringify(collisionContract, null, 2)}\n`);
+    }
+    write(base, "data/state.mjs", "base data");
+    write(candidate, "data/state.mjs", "candidate data");
+
+    expect(runTrustedContractCheck({ baseRepoRoot: base, candidateRepoRoot: candidate })).toEqual([]);
+  });
+
+  test("rejects duplicate or case-aliased staged arguments", () => {
+    for (const duplicatePath of ["data/state.txt", "DATA/state.txt"]) {
+      const candidate = makeRepo();
+      populate(candidate);
+      const invalid = structuredClone(contract()) as any;
+      invalid.trusted_node_checks["candidate-data-v1"].arguments.push({
+        root: "candidate",
+        path: duplicatePath,
+        kind: "file",
+      });
+      write(candidate, ".github/ci-policy-contract.json", `${JSON.stringify(invalid, null, 2)}\n`);
+
+      expect(runTrustedContractCheck({ candidateRepoRoot: candidate }).map((item) => item.rule))
+        .toEqual(["trusted-contract-config-invalid"]);
+    }
+  });
+
   test("rejects candidate data that fails a trusted base check", () => {
     const base = makeRepo();
     const candidate = makeRepo();

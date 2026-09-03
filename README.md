@@ -95,11 +95,12 @@ base 版だけを読みます。同じ PR で追加した例外による自己�
 candidate directoryは渡せず、列挙したregular fileだけを引数にできます。entrypointの静的な
 local import closureはAcornで構文解析し、すべてimmutable fileへ含めます。bare package、dynamic
 import、require、code-loading builtin、percent/query/fragmentを含むURL型specifierは拒否します。
-実行可能moduleは `.mjs` だけとし、baseからimmutable closureだけを一時隔離directoryへ複製して
+実行可能moduleは `.mjs` だけとし、baseからimmutable closureだけを一時隔離directoryのprogram treeへ複製して
 実行するため、未列挙のbase fileや `package.json` は実行意味に影響できません。宣言済みargumentも
-base/candidate checkoutから隔離input treeへ複製して、その複製pathだけをcheckerへ渡します。
-Node 26.8.1の[Permission Model](https://nodejs.org/api/permissions.html)をenforce modeで使い、隔離tree以外の
-filesystem read、全filesystem write、network、child process、worker、native addon、WASIを許可しません。
+base/candidate checkoutからdisjointな隔離input treeへ排他的に複製して、その複製pathだけをcheckerへ渡します。
+Node 26.8.1の[Permission Model](https://nodejs.org/api/permissions.html)をenforce modeで使い、`--allow-net`を
+付けずnetworkを既定拒否し、隔離tree以外のfilesystem read、全filesystem write、child process、worker、
+native addon、WASIも許可しません。workflowはexact Node versionとnet/http/fetch/DNS/UDPの実拒否を先に検証します。
 
 信頼境界はbaseでreview・immutable化済みのchecker本体です。executor自身がcandidate fileをmoduleとして
 解決・import・起動することはなく、candidateは実行moduleや依存を差し替えられません。宣言済みdataの

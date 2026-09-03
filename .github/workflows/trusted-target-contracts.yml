@@ -51,6 +51,9 @@ jobs:
         with:
           node-version: 26.8.1
 
+      - name: Verify trusted Node network denial
+        run: node --permission ci-policy/scripts/assert-node-network-denied.mjs
+
       - name: Run central policy checks
         env:
           TARGET_REPOSITORY: ${{ github.repository }}

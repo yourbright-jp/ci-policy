@@ -77,6 +77,8 @@ v6 は pull request / merge group / main push の base を別 checkout し、対
 - trusted check は base の entrypoint のみを、secret を除いた環境で実行
 - candidate directoryは渡さず、列挙したregular fileだけを引数にする
 - entrypointの静的なlocal import closureはAcornで構文解析し、すべてimmutable fileに含め、package/dynamic loaderとURL型specifierを拒否
+- Node builtinを必要最小限のallowlistへ限定し、loader capabilityのmember取得・別名化、`global` / `globalThis` / `WebAssembly`、computedまたは別名経由の `process` accessを拒否する
+- `process` は限定した直接参照だけを許可し、実行時にも文字列からのcode generationを無効化する
 - 実行moduleは `.mjs` に限定し、baseのimmutable closureだけを隔離program treeへ排他的に複製して実行する
 - 引数はprogram treeとdisjointな隔離input treeへ排他的に複製し、重複・case aliasを拒否する
 - 現在の実行では引数を宣言どおりbase/candidateから解決し、candidate snapshotにも全引数を保持して次のbaseとして自己完結させる
@@ -86,6 +88,7 @@ v6 は pull request / merge group / main push の base を別 checkout し、対
 - Permission Modelはreview済みbase checkerのblast radiusを抑えるseat beltであり、candidate codeのsandboxとは扱わない
 - candidate dataをcodeとして評価しないことは、base checkerをimmutable化するbootstrap reviewの必須確認項目とする
 - 新checkerは実装と全local dependency closureをimmutable化するPRとcheckを追加するPRの2段階で有効化し、どちらもcandidate側checker/moduleを実行しない
+- 初回bootstrap契約は `trusted_node_checks = {}` だけを許可し、active checkを同梱させない
 - config / file / argument は closed schema、fatal UTF-8、BOM・duplicate key・symlink・escape・過大入力拒否
 
 契約を caller workflow から独立して強制する場合は、組織 ruleset の

@@ -95,6 +95,10 @@ base 版だけを読みます。同じ PR で追加した例外による自己�
 candidate directoryは渡せず、列挙したregular fileだけを引数にできます。entrypointの静的な
 local import closureはAcornで構文解析し、すべてimmutable fileへ含めます。bare package、dynamic
 import、require、code-loading builtin、percent/query/fragmentを含むURL型specifierは拒否します。
+Node builtinは `node:crypto` / `node:fs` / `node:fs/promises` / `node:net` / `node:path` / `node:util` だけを許可します。
+loader capabilityのmember取得・別名化、`global` / `globalThis` / `WebAssembly`、computedまたは別名経由の
+`process` accessも拒否し、checker内の `process` は `argv` / `env` / `exit` / `exitCode` の直接参照だけを許可します。
+実行時にも文字列からのcode generationを無効化します。
 実行可能moduleは `.mjs` だけとし、baseからimmutable closureだけを一時隔離directoryのprogram treeへ複製して
 実行するため、未列挙のbase fileや `package.json` は実行意味に影響できません。宣言済みargumentも
 base/candidate checkoutからdisjointな隔離input treeへ排他的に複製して、その複製pathだけをcheckerへ渡します。
@@ -117,6 +121,7 @@ reviewしてからsource workflow rulesetを有効化します。
 次のPRでtrusted checkを追加します。entrypointとlocal dependency closureの全体がすでにbaseで
 immutableでなければactivationは失敗し、activation PRでもcandidate codeは実行しません。
 すでにbaseでimmutable化済みの新checkerがcandidate自身を検査して失敗する場合もactivationを拒否します。
+初回bootstrap契約の `trusted_node_checks` も必ず空にし、最初からactiveなcheckを持つ契約は拒否します。
 
 初回 bootstrap PR は必ず人手で内容を確認し、merge後にrulesetを有効化します。中央source
 workflowはbase契約がない対象をfail closedにするため、bootstrap前に有効化してはいけません。

@@ -61,24 +61,34 @@ const MAX_CHECK_ARGUMENTS = 16;
 const CHECK_TIMEOUT_MS = 30_000;
 const TRUSTED_NODE_VERSION = "26.8.1";
 const CHECK_ID = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
-const FORBIDDEN_NODE_IMPORTS = new Set([
-  "node:child_process",
-  "node:cluster",
-  "node:module",
-  "node:repl",
-  "node:sqlite",
-  "node:vm",
-  "node:worker_threads",
+const ALLOWED_NODE_IMPORTS = new Set([
+  "node:crypto",
+  "node:fs",
+  "node:fs/promises",
+  "node:net",
+  "node:path",
+  "node:util",
 ]);
 const FORBIDDEN_DYNAMIC_CALLEES = new Set([
   "AsyncFunction",
   "Function",
   "GeneratorFunction",
+  "__proto__",
+  "_linkedBinding",
+  "binding",
+  "constructor",
+  "compileFunction",
   "eval",
   "getBuiltinModule",
   "dlopen",
+  "prototype",
   "require",
+  "runInContext",
+  "runInNewContext",
+  "runInThisContext",
 ]);
+const FORBIDDEN_GLOBAL_IDENTIFIERS = new Set(["WebAssembly", "global", "globalThis"]);
+const ALLOWED_PROCESS_PROPERTIES = new Set(["argv", "env", "exit", "exitCode"]);
 
 export function runTrustedContractCheck(options: CheckOptions): TrustedContractViolation[] {
   const candidateRoot = canonicalDirectory(options.candidateRepoRoot);
@@ -102,6 +112,9 @@ export function runTrustedContractCheck(options: CheckOptions): TrustedContractV
     try {
       const candidateContract = loadContract(candidateConfig.path);
       validateContractSnapshot(candidateContract, candidateRoot);
+      if (Object.keys(candidateContract.trusted_node_checks).length !== 0) {
+        throw new Error("bootstrap trusted checks must be staged before activation");
+      }
       return [];
     } catch {
       return [violation("trusted-contract-config-invalid", CONTRACT_PATH, "Bootstrap contract is invalid.")];
@@ -254,8 +267,8 @@ function collectImmutableModuleClosure(
     const source = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
     for (const specifier of parseStaticModuleSpecifiers(source)) {
       if (specifier.startsWith("node:")) {
-        if (FORBIDDEN_NODE_IMPORTS.has(specifier)) {
-          throw new Error("trusted module code-loading builtin is forbidden");
+        if (!ALLOWED_NODE_IMPORTS.has(specifier)) {
+          throw new Error("trusted module builtin is not allowed");
         }
         continue;
       }
@@ -291,9 +304,9 @@ function parseStaticModuleSpecifiers(source: string): string[] {
     return value.value;
   };
 
-  const visit = (value: unknown) => {
+  const visit = (value: unknown, parent?: AstNode) => {
     if (Array.isArray(value)) {
-      for (const item of value) visit(item);
+      for (const item of value) visit(item, parent);
       return;
     }
     if (!isAstNode(value)) return;
@@ -304,6 +317,19 @@ function parseStaticModuleSpecifiers(source: string): string[] {
     if (value.type === "Identifier"
       && typeof value.name === "string"
       && FORBIDDEN_DYNAMIC_CALLEES.has(value.name)) {
+      throw new Error("dynamic trusted module loading is forbidden");
+    }
+    if (value.type === "Identifier"
+      && typeof value.name === "string"
+      && FORBIDDEN_GLOBAL_IDENTIFIERS.has(value.name)) {
+      throw new Error("dynamic global access is forbidden");
+    }
+    if (value.type === "Identifier"
+      && value.name === "process"
+      && !isAllowedProcessReference(value, parent)) {
+      throw new Error("indirect process access is forbidden");
+    }
+    if (value.type === "MemberExpression" && hasForbiddenMemberProperty(value)) {
       throw new Error("dynamic trusted module loading is forbidden");
     }
     if ((value.type === "CallExpression" || value.type === "NewExpression")
@@ -319,7 +345,7 @@ function parseStaticModuleSpecifiers(source: string): string[] {
     }
 
     for (const [key, child] of Object.entries(value)) {
-      if (key !== "start" && key !== "end" && key !== "loc" && key !== "range") visit(child);
+      if (key !== "start" && key !== "end" && key !== "loc" && key !== "range") visit(child, value);
     }
   };
 
@@ -339,6 +365,10 @@ function isForbiddenDynamicCallee(value: unknown): boolean {
   if (value.type === "Identifier" && typeof value.name === "string") {
     return FORBIDDEN_DYNAMIC_CALLEES.has(value.name);
   }
+  return value.type === "MemberExpression" && hasForbiddenMemberProperty(value);
+}
+
+function hasForbiddenMemberProperty(value: AstNode): boolean {
   if (value.type !== "MemberExpression") return false;
   const property = value.property;
   if (!isAstNode(property)) return false;
@@ -349,6 +379,17 @@ function isForbiddenDynamicCallee(value: unknown): boolean {
     return FORBIDDEN_DYNAMIC_CALLEES.has(property.value);
   }
   return false;
+}
+
+function isAllowedProcessReference(value: AstNode, parent?: AstNode): boolean {
+  if (!parent || parent.type !== "MemberExpression" || parent.object !== value || parent.computed !== false) {
+    return false;
+  }
+  const property = parent.property;
+  return isAstNode(property)
+    && property.type === "Identifier"
+    && typeof property.name === "string"
+    && ALLOWED_PROCESS_PROPERTIES.has(property.name);
 }
 
 function validateContractEvolution(
@@ -473,7 +514,13 @@ function runBaseChecks(
     }
 
     try {
-      const childArguments = ["--permission", `--allow-fs-read=${isolatedRoot}`, entrypoint, ...args];
+      const childArguments = [
+        "--permission",
+        "--disallow-code-generation-from-strings",
+        `--allow-fs-read=${isolatedRoot}`,
+        entrypoint,
+        ...args,
+      ];
       const result = spawnSync(trustedNodeExecutable, childArguments, {
         cwd: isolatedRoot,
         encoding: "utf8",

@@ -59,11 +59,22 @@ if (process.env.GITHUB_TOKEN || readFileSync(process.argv[2], "utf8") !== "safe"
 }
 
 describe("runTrustedContractCheck", () => {
-  test("accepts a valid bootstrap without executing candidate code", () => {
+  test("accepts a bootstrap that only stages immutable checker code", () => {
     const candidate = makeRepo();
     populate(candidate, "unsafe");
+    const staged = structuredClone(contract()) as any;
+    staged.trusted_node_checks = {};
+    write(candidate, ".github/ci-policy-contract.json", `${JSON.stringify(staged, null, 2)}\n`);
 
     expect(runTrustedContractCheck({ candidateRepoRoot: candidate })).toEqual([]);
+  });
+
+  test("rejects active trusted checks in the initial bootstrap contract", () => {
+    const candidate = makeRepo();
+    populate(candidate);
+
+    expect(runTrustedContractCheck({ candidateRepoRoot: candidate }).map((item) => item.rule))
+      .toEqual(["trusted-contract-config-invalid"]);
   });
 
   test("executes only the base check with a stripped environment", () => {
@@ -393,27 +404,65 @@ if (readFileSync(process.argv[2], "utf8") !== "candidate data") process.exit(1);
   });
 
   test("rejects js entrypoints and code-loading capabilities", () => {
+    const jsBase = makeRepo();
     const jsCandidate = makeRepo();
+    populate(jsBase);
     populate(jsCandidate);
     const jsContract = structuredClone(contract()) as any;
     jsContract.immutable_files = ["scripts/verify.js"];
     jsContract.trusted_node_checks["candidate-data-v1"].entrypoint = "scripts/verify.js";
+    write(jsBase, "scripts/verify.js", "process.exit(0);\n");
     write(jsCandidate, "scripts/verify.js", "process.exit(0);\n");
+    write(jsBase, ".github/ci-policy-contract.json", `${JSON.stringify(jsContract, null, 2)}\n`);
     write(jsCandidate, ".github/ci-policy-contract.json", `${JSON.stringify(jsContract, null, 2)}\n`);
-    expect(runTrustedContractCheck({ candidateRepoRoot: jsCandidate }).map((item) => item.rule))
+    expect(runTrustedContractCheck({ baseRepoRoot: jsBase, candidateRepoRoot: jsCandidate }).map((item) => item.rule))
       .toEqual(["trusted-contract-config-invalid"]);
 
     for (const source of [
       'import { createRequire } from "node:module"; createRequire(import.meta.url)("./mutable.cjs");\n',
+      'import processAlias from "node:process"; const key = "getBuiltin" + "Module"; processAlias[key]("node:module");\n',
+      'import { run } from "node:test"; run({ files: [process.argv[2]], isolation: "none" });\n',
+      'import inspector from "node:inspector"; inspector.open();\n',
+      'import "node:inspector/promises";\n',
+      'import "node:ffi";\n',
+      'import "node:wasi";\n',
       'const load = process.getBuiltinModule; load("module");\n',
+      'const load = process["getBuiltinModule"]; load("node:module").createRequire(import.meta.url)(process.argv[2]);\n',
+      'const key = "getBuiltinModule"; const load = process[key]; load("node:module");\n',
+      'const processAlias = process; processAlias.getBuiltinModule("node:module");\n',
+      'globalThis.process.getBuiltinModule("node:module");\n',
+      'WebAssembly.instantiate(new Uint8Array());\n',
+      '(() => {}).constructor("return process")().getBuiltinModule("node:module");\n',
       'eval("process.exit(0)");\n',
       'new Function("process.exit(0)")();\n',
     ]) {
+      const base = makeRepo();
       const candidate = makeRepo();
+      populate(base);
       populate(candidate);
+      write(base, "scripts/verify.mjs", source);
       write(candidate, "scripts/verify.mjs", source);
-      expect(runTrustedContractCheck({ candidateRepoRoot: candidate }).map((item) => item.rule))
+      expect(runTrustedContractCheck({ baseRepoRoot: base, candidateRepoRoot: candidate }).map((item) => item.rule))
         .toEqual(["trusted-contract-config-invalid"]);
+    }
+  });
+
+  test("disables string code generation in the actual trusted checker child", () => {
+    for (const source of [
+      'const key = "con" + "structor"; const F = (() => {})[key]; F("return 42")(); process.exit(0);\n',
+      'const key = `con${"structor"}`; const { [key]: F } = (() => {}); F("return 42")(); process.exit(0);\n',
+      'const key = "con" + "structor"; const F = Reflect.get(() => {}, key); F("return 42")(); process.exit(0);\n',
+      'const key = "con" + "structor"; const F = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(() => {}), key).value; F("return 42")(); process.exit(0);\n',
+    ]) {
+      const base = makeRepo();
+      const candidate = makeRepo();
+      populate(base);
+      populate(candidate);
+      write(base, "scripts/verify.mjs", source);
+      write(candidate, "scripts/verify.mjs", source);
+
+      expect(runTrustedContractCheck({ baseRepoRoot: base, candidateRepoRoot: candidate }).map((item) => item.rule))
+        .toContain("trusted-contract-check-failed");
     }
   });
 

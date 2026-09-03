@@ -46,6 +46,11 @@ jobs:
           path: ci-policy
           persist-credentials: false
 
+      - name: Setup trusted Node runtime
+        uses: actions/setup-node@v6
+        with:
+          node-version: 26.8.1
+
       - name: Run central policy checks
         env:
           TARGET_REPOSITORY: ${{ github.repository }}

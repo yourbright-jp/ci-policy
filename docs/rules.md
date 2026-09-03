@@ -78,7 +78,9 @@ v6 は pull request / merge group / main push の base を別 checkout し、対
 - candidate directoryは渡さず、列挙したregular fileだけを引数にする
 - entrypointの静的なlocal import closureはAcornで構文解析し、すべてimmutable fileに含め、package/dynamic loaderとURL型specifierを拒否
 - 実行moduleは `.mjs` に限定し、baseのimmutable closureだけを隔離directoryへ複製して実行する
-- 新checkerは実装と全local dependency closureをimmutable化するPRとcheckを追加するPRの2段階で有効化し、どちらもcandidate codeを実行しない
+- 引数も隔離input treeへ複製し、Node 26.8.1 Permission Modelで隔離tree以外のread、write、network、process、worker、addon、WASIを拒否する
+- candidate dataをcodeとして評価しないことは、base checkerをimmutable化するbootstrap reviewの必須確認項目とする
+- 新checkerは実装と全local dependency closureをimmutable化するPRとcheckを追加するPRの2段階で有効化し、どちらもcandidate側checker/moduleを実行しない
 - config / file / argument は closed schema、fatal UTF-8、BOM・duplicate key・symlink・escape・過大入力拒否
 
 契約を caller workflow から独立して強制する場合は、組織 ruleset の

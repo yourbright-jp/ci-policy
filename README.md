@@ -96,7 +96,15 @@ candidate directoryは渡せず、列挙したregular fileだけを引数にで�
 local import closureはAcornで構文解析し、すべてimmutable fileへ含めます。bare package、dynamic
 import、require、code-loading builtin、percent/query/fragmentを含むURL型specifierは拒否します。
 実行可能moduleは `.mjs` だけとし、baseからimmutable closureだけを一時隔離directoryへ複製して
-実行するため、未列挙のbase fileや `package.json` は実行意味に影響できません。
+実行するため、未列挙のbase fileや `package.json` は実行意味に影響できません。宣言済みargumentも
+base/candidate checkoutから隔離input treeへ複製して、その複製pathだけをcheckerへ渡します。
+Node 26.8.1の[Permission Model](https://nodejs.org/api/permissions.html)をenforce modeで使い、隔離tree以外の
+filesystem read、全filesystem write、network、child process、worker、native addon、WASIを許可しません。
+
+信頼境界はbaseでreview・immutable化済みのchecker本体です。executor自身がcandidate fileをmoduleとして
+解決・import・起動することはなく、candidateは実行moduleや依存を差し替えられません。宣言済みdataの
+解釈はtrusted checkerの責任なので、bootstrap時にはcheckerがdataをcodeとして評価しないことも人手で
+reviewしてからsource workflow rulesetを有効化します。
 
 新checkerは2段階で有効化します。最初のPRでは実装と依存closureをimmutable fileとして追加し、
 次のPRでtrusted checkを追加します。entrypointとlocal dependency closureの全体がすでにbaseで

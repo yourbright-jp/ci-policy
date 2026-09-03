@@ -62,6 +62,11 @@ jobs:
           path: ci-policy
           persist-credentials: false
 
+      - name: Setup trusted Node runtime
+        uses: actions/setup-node@v6
+        with:
+          node-version: 26.8.1
+
       - name: Setup Bun for policy self-test
         if: github.repository == 'yourbright-jp/ci-policy'
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6

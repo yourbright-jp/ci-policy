@@ -60,6 +60,7 @@ const FORBIDDEN_NODE_IMPORTS = new Set([
   "node:cluster",
   "node:module",
   "node:repl",
+  "node:sqlite",
   "node:vm",
   "node:worker_threads",
 ]);
@@ -390,14 +391,26 @@ function runBaseChecks(
     }
     const args: string[] = [];
     let valid = true;
-    for (const argument of check.arguments) {
-      const argumentRoot = argument.root === "base" ? baseRoot : candidateRoot;
-      const resolved = resolveInside(argumentRoot, argument.path, argument.kind, MAX_IMMUTABLE_FILE_BYTES);
-      if (!resolved) {
-        valid = false;
-        break;
+    try {
+      for (const argument of check.arguments) {
+        const argumentRoot = argument.root === "base" ? baseRoot : candidateRoot;
+        const resolved = resolveInside(argumentRoot, argument.path, argument.kind, MAX_IMMUTABLE_FILE_BYTES);
+        if (!resolved) {
+          valid = false;
+          break;
+        }
+        const isolatedArgument = path.join(
+          isolatedRoot,
+          "inputs",
+          argument.root,
+          ...argument.path.split("/"),
+        );
+        mkdirSync(path.dirname(isolatedArgument), { recursive: true });
+        copyFileSync(resolved, isolatedArgument);
+        args.push(realpathSync(isolatedArgument));
       }
-      args.push(resolved);
+    } catch {
+      valid = false;
     }
     if (!valid) {
       rmSync(isolatedRoot, { force: true, recursive: true });
@@ -406,7 +419,10 @@ function runBaseChecks(
     }
 
     try {
-      const result = spawnSync(process.execPath, [entrypoint, ...args], {
+      const childArguments = process.versions.bun
+        ? [entrypoint, ...args]
+        : ["--permission", `--allow-fs-read=${isolatedRoot}`, entrypoint, ...args];
+      const result = spawnSync(process.execPath, childArguments, {
         cwd: isolatedRoot,
         encoding: "utf8",
         env: restrictedEnvironment(),

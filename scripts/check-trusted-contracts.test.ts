@@ -75,6 +75,21 @@ describe("runTrustedContractCheck", () => {
     expect(runTrustedContractCheck({ baseRepoRoot: base, candidateRepoRoot: candidate })).toEqual([]);
   });
 
+  test("passes only isolated copies of declared candidate inputs", () => {
+    const base = makeRepo();
+    const candidate = makeRepo();
+    populate(base);
+    populate(candidate);
+    const checker = `import { readFileSync } from "node:fs";
+const input = process.argv[2].replaceAll("\\\\", "/");
+if (!input.includes("/inputs/candidate/data/state.txt") || readFileSync(input, "utf8") !== "safe") process.exit(1);
+`;
+    write(base, "scripts/verify.mjs", checker);
+    write(candidate, "scripts/verify.mjs", checker);
+
+    expect(runTrustedContractCheck({ baseRepoRoot: base, candidateRepoRoot: candidate })).toEqual([]);
+  });
+
   test("rejects candidate data that fails a trusted base check", () => {
     const base = makeRepo();
     const candidate = makeRepo();

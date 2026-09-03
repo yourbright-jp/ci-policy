@@ -61,8 +61,30 @@ GitHub Actions workflow から次の token 名を参照することを禁止し�
 - `actions/upload-artifact@v4` / `@v5`
 - `oven-sh/setup-bun@v2`
 - `github/codeql-action/*@v*`
-- `yourbright-jp/ci-policy/.github/workflows/required-policy.yml@v3` / `@v4` / `@v5`
-- `yourbright-jp/ci-policy/.github/workflows/coverage-policy.yml@v3` / `@v4` / `@v5`
+- `yourbright-jp/ci-policy/.github/workflows/required-policy.yml@v3` / `@v4` / `@v5` / `@v6`
+- `yourbright-jp/ci-policy/.github/workflows/coverage-policy.yml@v3` / `@v4` / `@v5` / `@v6`
+
+## candidate が同じ PR で guardrail を弱めない
+
+v6 は pull request / merge group / main push の base を別 checkout し、対象 repo の
+`.github/ci-policy-exceptions.yaml` は base 版だけを信頼します。candidate が追加・延長した
+例外は、その PR 自身の検査には適用しません。
+
+`.github/ci-policy-contract.json` を opt-in した repo では、次も例外対象外として検査します。
+
+- base 契約にある immutable file は byte 単位で変更・削除禁止
+- base 契約にある trusted check は変更・削除禁止
+- trusted check は base の entrypoint のみを、secret を除いた環境で実行
+- candidate directoryは渡さず、列挙したregular fileだけを引数にする
+- entrypointの静的なlocal import closureはすべてimmutable fileに含め、package/dynamic loaderを拒否
+- 新checkerは実装をimmutable化するPRとcheckを追加するPRの2段階で有効化し、どちらもcandidate codeを実行しない
+- config / file / argument は closed schema、fatal UTF-8、BOM・duplicate key・symlink・escape・過大入力拒否
+
+契約を caller workflow から独立して強制する場合は、組織 ruleset の
+`Require workflows to pass before merging` で中央の
+`.github/workflows/trusted-target-contracts.yml` を source workflow に指定します。
+source workflowはbase契約のない対象をfail closedにするため、bootstrapをreview・mergeした後で
+rulesetを有効化します。source refには更新・削除をtag rulesetで禁止したrelease tagを使います。
 
 ## public repo にプロジェクト固有情報を置かない
 

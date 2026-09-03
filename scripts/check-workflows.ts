@@ -3,6 +3,7 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 import yaml from "js-yaml";
+import { runTrustedContractCheck } from "./check-trusted-contracts";
 
 export type Violation = {
   rule: string;
@@ -23,6 +24,8 @@ type ExceptionEntry = {
 
 type CheckOptions = {
   repoRoot: string;
+  baseRepoRoot?: string;
+  requireTrustedContract?: boolean;
   repository: string;
   exceptionsPath?: string;
   targetExceptionsPath?: string;
@@ -42,8 +45,8 @@ const ALLOWED_USES = [
   /^actions\/upload-artifact@v[45]$/,
   /^oven-sh\/setup-bun@v2$/,
   /^github\/codeql-action\/[^@\s]+@v\d+$/,
-  /^yourbright-jp\/ci-policy\/\.github\/workflows\/required-policy\.yml@v[2345]$/,
-  /^yourbright-jp\/ci-policy\/\.github\/workflows\/coverage-policy\.yml@v[2345]$/,
+  /^yourbright-jp\/ci-policy\/\.github\/workflows\/required-policy\.yml@v[23456]$/,
+  /^yourbright-jp\/ci-policy\/\.github\/workflows\/coverage-policy\.yml@v[23456]$/,
 ];
 
 const DEPLOY_COMMANDS = [
@@ -62,13 +65,17 @@ const SHA_PIN = /@[a-f0-9]{40}$/i;
 
 export function runPolicyCheck(options: CheckOptions): CheckResult {
   const repoRoot = path.resolve(options.repoRoot);
+  const exceptionRepoRoot = options.baseRepoRoot && existsSync(options.baseRepoRoot)
+    ? path.resolve(options.baseRepoRoot)
+    : repoRoot;
   const now = options.now ?? new Date();
   const exceptions = [
     ...loadExceptions(
       options.exceptionsPath ?? path.join(process.cwd(), "policies", "exceptions.yaml"),
     ),
     ...loadExceptions(
-      options.targetExceptionsPath ?? path.join(repoRoot, ".github", "ci-policy-exceptions.yaml"),
+      options.targetExceptionsPath
+        ?? path.join(exceptionRepoRoot, ".github", "ci-policy-exceptions.yaml"),
     ),
   ];
   const violations: Violation[] = [];
@@ -106,13 +113,18 @@ export function runPolicyCheck(options: CheckOptions): CheckResult {
     checkWorkflow(workflow as Record<string, unknown>, workflowPath, bunRepo, violations);
   }
 
-  const activeViolations = violations.filter(
+  const activeWorkflowViolations = violations.filter(
     (violation) => !isExcepted(violation, exceptions, options.repository, now),
   );
+  const trustedContractViolations = runTrustedContractCheck({
+    baseRepoRoot: options.baseRepoRoot,
+    candidateRepoRoot: repoRoot,
+    requireTrustedContract: options.requireTrustedContract,
+  });
 
   return {
-    ok: activeViolations.length === 0,
-    violations: activeViolations,
+    ok: activeWorkflowViolations.length === 0 && trustedContractViolations.length === 0,
+    violations: [...activeWorkflowViolations, ...trustedContractViolations],
   };
 }
 
@@ -347,6 +359,8 @@ function matchesRepository(value: string | string[] | undefined, repository: str
 
 function parseArgs(argv: string[]): CheckOptions {
   let repoRoot = process.cwd();
+  let baseRepoRoot: string | undefined;
+  let requireTrustedContract = false;
   let repository =
     process.env.TARGET_REPOSITORY ?? process.env.GITHUB_REPOSITORY ?? "unknown/unknown";
   let exceptionsPath: string | undefined;
@@ -356,6 +370,10 @@ function parseArgs(argv: string[]): CheckOptions {
     const value = argv[index];
     if (value === "--repo") {
       repoRoot = argv[++index] ?? repoRoot;
+    } else if (value === "--base-repo") {
+      baseRepoRoot = argv[++index];
+    } else if (value === "--require-trusted-contract") {
+      requireTrustedContract = true;
     } else if (value === "--repository") {
       repository = argv[++index] ?? repository;
     } else if (value === "--exceptions") {
@@ -365,7 +383,14 @@ function parseArgs(argv: string[]): CheckOptions {
     }
   }
 
-  return { repoRoot, repository, exceptionsPath, targetExceptionsPath };
+  return {
+    repoRoot,
+    baseRepoRoot,
+    requireTrustedContract,
+    repository,
+    exceptionsPath,
+    targetExceptionsPath,
+  };
 }
 
 const entrypoint = process.argv[1];

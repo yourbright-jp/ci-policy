@@ -41,6 +41,8 @@ on:
     branches:
       - main
   pull_request:
+    types: [opened, synchronize, reopened, edited]
+  merge_group:
 
 permissions:
   contents: read
@@ -49,17 +51,62 @@ jobs:
   policy:
     permissions:
       contents: read
-    uses: yourbright-jp/ci-policy/.github/workflows/required-policy.yml@v5
+    uses: yourbright-jp/ci-policy/.github/workflows/required-policy.yml@v6
     with:
       repository: yourbright-jp/example-repo
 ```
 
 GitHub の ruleset では、各 repo の `policy / policy` check を required status check にします。
 
-v5 では workflow 規約と PR 本文の必須セクション (`## 概要` / `## テスト`) を同じ
+v6 では workflow 規約と PR 本文の必須セクション (`## 概要` / `## テスト`) を同じ
 required job で検証します。検証コードはリリース済みの Node.js bundle を
 `ubuntu-slim` で実行するため、caller ごとの Bun setup / dependency install や
 PR 本文専用 job は不要です。空でない Dependabot PR 本文は見出し検証を免除します。
+pull request / merge group / main push では base と candidate を別 checkout し、例外は
+base 版だけを読みます。同じ PR で追加した例外による自己免除はできません。
+
+### Trusted target contract (opt-in)
+
+対象 repo の `.github/ci-policy-contract.json` が base に存在すると、v6 は candidate が
+既存契約を弱めていないこと、指定ファイルの byte が変わっていないことを確認し、base
+版の Node checker だけを実行します。checker には GitHub token や secret を渡さず、出力も
+破棄します。中央 public repo に対象 repo 名や内部パスを置く必要はありません。
+
+```json
+{
+  "schema_version": 1,
+  "immutable_files": [
+    "scripts/verify-policy-history.mjs",
+    "scripts/lib/policy-schema.mjs"
+  ],
+  "trusted_node_checks": {
+    "policy-history-v1": {
+      "entrypoint": "scripts/verify-policy-history.mjs",
+      "arguments": [
+        { "root": "base", "path": "data/policy.json", "kind": "file" },
+        { "root": "candidate", "path": "data/policy.json", "kind": "file" }
+      ]
+    }
+  }
+}
+```
+
+契約は追記のみ可能です。既存の immutable file / trusted check は削除・変更できません。
+candidate directoryは渡せず、列挙したregular fileだけを引数にできます。entrypointの静的な
+local import closureもすべてimmutable fileへ含め、bare package / dynamic import / requireは拒否します。
+
+新checkerは2段階で有効化します。最初のPRでは実装と依存closureをimmutable fileとして追加し、
+次のPRでtrusted checkを追加します。entrypointがすでにbaseでimmutableでなければactivationは
+失敗し、activation PRでもcandidate codeは実行しません。
+
+初回 bootstrap PR は必ず人手で内容を確認し、merge後にrulesetを有効化します。中央source
+workflowはbase契約がない対象をfail closedにするため、bootstrap前に有効化してはいけません。
+
+caller workflow の置換で required status 名を偽装できないよう、組織 ruleset ではこの repo の
+`.github/workflows/trusted-target-contracts.yml` を `Require workflows to pass before merging` の
+source workflow として保護済みrelease tagで指定するのが正本です。release tagの更新・削除も
+tag rulesetで禁止します。通常の
+`policy / policy` required status check は補助防御として併用します。
 
 ### Coverage gate (opt-in)
 
@@ -70,7 +117,7 @@ jobs:
   coverage:
     permissions:
       contents: read
-    uses: yourbright-jp/ci-policy/.github/workflows/coverage-policy.yml@v5
+    uses: yourbright-jp/ci-policy/.github/workflows/coverage-policy.yml@v6
     with:
       repository: yourbright-jp/example-repo
       # 任意 override (省略時は line 60 / branch 50)

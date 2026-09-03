@@ -80,21 +80,44 @@ describe("runTrustedContractCheck", () => {
     const base = makeRepo();
     const candidate = makeRepo();
     populate(base);
-    populate(candidate);
-    const baseOnlyContract = structuredClone(contract()) as any;
-    baseOnlyContract.trusted_node_checks["candidate-data-v1"].arguments = [
-      { root: "base", path: "data/base-only.txt", kind: "file" },
+    populate(candidate, "unsafe");
+    const rootedContract = structuredClone(contract()) as any;
+    rootedContract.trusted_node_checks["candidate-data-v1"].arguments = [
+      { root: "base", path: "data/state.txt", kind: "file" },
+      { root: "candidate", path: "data/state.txt", kind: "file" },
     ];
-    write(base, "data/base-only.txt", "safe");
-    write(candidate, "data/base-only.txt", "unsafe");
-    write(base, ".github/ci-policy-contract.json", `${JSON.stringify(baseOnlyContract, null, 2)}\n`);
-    write(candidate, ".github/ci-policy-contract.json", `${JSON.stringify(baseOnlyContract, null, 2)}\n`);
+    const checker = `import { readFileSync } from "node:fs";
+const values = process.argv.slice(2).map((input) => readFileSync(input, "utf8"));
+const currentTransition = values[0] === "safe" && values[1] === "unsafe";
+const nextBaseIsViable = values[0] === "unsafe" && values[1] === "unsafe";
+if (!currentTransition && !nextBaseIsViable) process.exit(1);
+`;
+    write(base, "scripts/verify.mjs", checker);
+    write(candidate, "scripts/verify.mjs", checker);
+    write(base, ".github/ci-policy-contract.json", `${JSON.stringify(rootedContract, null, 2)}\n`);
+    write(candidate, ".github/ci-policy-contract.json", `${JSON.stringify(rootedContract, null, 2)}\n`);
 
     expect(runTrustedContractCheck({ baseRepoRoot: base, candidateRepoRoot: candidate })).toEqual([]);
 
-    rmSync(path.join(candidate, "data", "base-only.txt"));
+    rmSync(path.join(candidate, "data", "state.txt"));
     expect(runTrustedContractCheck({ baseRepoRoot: base, candidateRepoRoot: candidate }).map((item) => item.rule))
       .toEqual(["trusted-contract-config-invalid"]);
+  });
+
+  test("rejects a change that would make the candidate fail as the next trusted base", () => {
+    const base = makeRepo();
+    const candidate = makeRepo();
+    populate(base);
+    populate(candidate, "unsafe");
+    const baseOnlyContract = structuredClone(contract()) as any;
+    baseOnlyContract.trusted_node_checks["candidate-data-v1"].arguments = [
+      { root: "base", path: "data/state.txt", kind: "file" },
+    ];
+    write(base, ".github/ci-policy-contract.json", `${JSON.stringify(baseOnlyContract, null, 2)}\n`);
+    write(candidate, ".github/ci-policy-contract.json", `${JSON.stringify(baseOnlyContract, null, 2)}\n`);
+
+    expect(runTrustedContractCheck({ baseRepoRoot: base, candidateRepoRoot: candidate }).map((item) => item.rule))
+      .toContain("trusted-contract-check-failed");
   });
 
   test("denies network access in the actual trusted checker child", () => {

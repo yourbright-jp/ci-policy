@@ -126,6 +126,11 @@ export function runTrustedContractCheck(options: CheckOptions): TrustedContractV
     if (violations.length === 0) {
       runBaseChecks(baseContract, baseRoot!, candidateRoot, violations);
     }
+    if (violations.length === 0) {
+      // The candidate becomes the next trusted base. Re-run the immutable base
+      // checker against that future snapshot so a merge cannot lock every later PR.
+      runBaseChecks(baseContract, candidateRoot, candidateRoot, violations);
+    }
     return violations;
   } catch {
     return [violation("trusted-contract-config-invalid", CONTRACT_PATH, "Trusted contract input is invalid.")];

@@ -98,6 +98,9 @@ import、require、code-loading builtin、percent/query/fragmentを含むURL型s
 実行可能moduleは `.mjs` だけとし、baseからimmutable closureだけを一時隔離directoryのprogram treeへ複製して
 実行するため、未列挙のbase fileや `package.json` は実行意味に影響できません。宣言済みargumentも
 base/candidate checkoutからdisjointな隔離input treeへ排他的に複製して、その複製pathだけをcheckerへ渡します。
+各argumentは現在の実行では宣言した `root` から解決し、candidate snapshot内にも全件が存在することを必須にします。
+さらに同じimmutable base checkerを `(base, candidate)` に加えて `(candidate, candidate)` でも実行し、merge後に
+candidateが次のtrusted baseになっても同じ契約が自己完結して成功することをmerge前に確認します。
 checkerはBunや別Nodeで直接実行せず、exact Node 26.8.1が確認できなければfail closedにします。
 Node 26.8.1の[Permission Model](https://nodejs.org/api/permissions.html)をenforce modeで使い、`--allow-net`を
 付けずnetworkを既定拒否し、隔離tree以外のfilesystem read、全filesystem write、child process、worker、

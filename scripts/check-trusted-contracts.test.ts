@@ -4,6 +4,7 @@ import {
   mkdirSync,
   mkdtempSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -73,6 +74,27 @@ describe("runTrustedContractCheck", () => {
     process.env.GITHUB_TOKEN = "must-not-reach-check";
 
     expect(runTrustedContractCheck({ baseRepoRoot: base, candidateRepoRoot: candidate })).toEqual([]);
+  });
+
+  test("resolves base-root arguments from the base while keeping the next snapshot viable", () => {
+    const base = makeRepo();
+    const candidate = makeRepo();
+    populate(base);
+    populate(candidate);
+    const baseOnlyContract = structuredClone(contract()) as any;
+    baseOnlyContract.trusted_node_checks["candidate-data-v1"].arguments = [
+      { root: "base", path: "data/base-only.txt", kind: "file" },
+    ];
+    write(base, "data/base-only.txt", "safe");
+    write(candidate, "data/base-only.txt", "unsafe");
+    write(base, ".github/ci-policy-contract.json", `${JSON.stringify(baseOnlyContract, null, 2)}\n`);
+    write(candidate, ".github/ci-policy-contract.json", `${JSON.stringify(baseOnlyContract, null, 2)}\n`);
+
+    expect(runTrustedContractCheck({ baseRepoRoot: base, candidateRepoRoot: candidate })).toEqual([]);
+
+    rmSync(path.join(candidate, "data", "base-only.txt"));
+    expect(runTrustedContractCheck({ baseRepoRoot: base, candidateRepoRoot: candidate }).map((item) => item.rule))
+      .toEqual(["trusted-contract-config-invalid"]);
   });
 
   test("denies network access in the actual trusted checker child", () => {
@@ -379,6 +401,80 @@ if (readFileSync(new URL("./mutable.txt", import.meta.url), "utf8") !== "safe") 
       requireTrustedContract: true,
     });
     expect(result.map((item) => item.rule)).toEqual(["trusted-contract-base-missing"]);
+  });
+
+  test("allows optional bootstrap only when the contract path is truly absent", () => {
+    const candidate = makeRepo();
+
+    expect(runTrustedContractCheck({ candidateRepoRoot: candidate })).toEqual([]);
+  });
+
+  test("rejects present but invalid bootstrap contract paths", () => {
+    const invalidCandidates = [
+      () => {
+        const candidate = makeRepo();
+        write(candidate, ".github/ci-policy-contract.json", "");
+        return candidate;
+      },
+      () => {
+        const candidate = makeRepo();
+        write(candidate, ".github/ci-policy-contract.json", new Uint8Array(64 * 1024 + 1));
+        return candidate;
+      },
+      () => {
+        const candidate = makeRepo();
+        mkdirSync(path.join(candidate, ".github", "ci-policy-contract.json"), { recursive: true });
+        return candidate;
+      },
+      () => {
+        const target = makeRepo();
+        const candidate = makeRepo();
+        mkdirSync(path.join(candidate, ".github"), { recursive: true });
+        symlinkSync(
+          target,
+          path.join(candidate, ".github", "ci-policy-contract.json"),
+          process.platform === "win32" ? "junction" : "dir",
+        );
+        return candidate;
+      },
+      () => {
+        const target = makeRepo();
+        const candidate = makeRepo();
+        write(target, "ci-policy-contract.json", `${JSON.stringify(contract(), null, 2)}\n`);
+        symlinkSync(target, path.join(candidate, ".github"), process.platform === "win32" ? "junction" : "dir");
+        return candidate;
+      },
+    ];
+
+    for (const makeCandidate of invalidCandidates) {
+      const result = runTrustedContractCheck({ candidateRepoRoot: makeCandidate() });
+      expect(result.map((item) => item.rule)).toEqual(["trusted-contract-config-invalid"]);
+    }
+  });
+
+  test("never downgrades an invalid base or candidate contract to bootstrap or removal", () => {
+    const invalidBase = makeRepo();
+    const validCandidate = makeRepo();
+    write(invalidBase, ".github/ci-policy-contract.json", "");
+    populate(validCandidate);
+    expect(runTrustedContractCheck({ baseRepoRoot: invalidBase, candidateRepoRoot: validCandidate }).map((item) => item.rule))
+      .toEqual(["trusted-contract-config-invalid"]);
+
+    const validBase = makeRepo();
+    const invalidCandidate = makeRepo();
+    populate(validBase);
+    write(invalidCandidate, ".github/ci-policy-contract.json", "");
+    expect(runTrustedContractCheck({ baseRepoRoot: validBase, candidateRepoRoot: invalidCandidate }).map((item) => item.rule))
+      .toEqual(["trusted-contract-config-invalid"]);
+  });
+
+  test("reports a truly missing candidate contract as removed", () => {
+    const base = makeRepo();
+    const candidate = makeRepo();
+    populate(base);
+
+    expect(runTrustedContractCheck({ baseRepoRoot: base, candidateRepoRoot: candidate }).map((item) => item.rule))
+      .toEqual(["trusted-contract-config-removed"]);
   });
 
   test("rejects directory arguments in trusted contracts", () => {

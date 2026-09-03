@@ -3,7 +3,6 @@ import { parse } from "acorn";
 import {
   constants as fsConstants,
   copyFileSync,
-  existsSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
@@ -42,6 +41,11 @@ type CheckOptions = {
   candidateRepoRoot: string;
   requireTrustedContract?: boolean;
 };
+
+type ContractPathState =
+  | { kind: "missing" }
+  | { kind: "invalid" }
+  | { kind: "valid"; path: string };
 
 type AstNode = {
   type: string;
@@ -82,35 +86,38 @@ export function runTrustedContractCheck(options: CheckOptions): TrustedContractV
     return [violation("trusted-contract-candidate-invalid", CONTRACT_PATH, "Candidate checkout is unavailable.")];
   }
 
-  const candidateConfigPath = resolveInside(candidateRoot, CONTRACT_PATH, "file", MAX_CONFIG_BYTES);
+  const candidateConfig = resolveContractPath(candidateRoot);
   const baseRoot = options.baseRepoRoot ? canonicalDirectory(options.baseRepoRoot) : undefined;
-  const baseConfigPath = baseRoot
-    ? resolveInside(baseRoot, CONTRACT_PATH, "file", MAX_CONFIG_BYTES)
-    : undefined;
+  const baseConfig: ContractPathState = baseRoot ? resolveContractPath(baseRoot) : { kind: "missing" };
 
-  if (!baseConfigPath) {
+  if (baseConfig.kind === "invalid" || candidateConfig.kind === "invalid") {
+    return [violation("trusted-contract-config-invalid", CONTRACT_PATH, "Trusted contract path is invalid.")];
+  }
+
+  if (baseConfig.kind === "missing") {
     if (options.requireTrustedContract) {
       return [violation("trusted-contract-base-missing", CONTRACT_PATH, "Trusted base contract is required.")];
     }
-    if (!candidateConfigPath) return [];
+    if (candidateConfig.kind === "missing") return [];
     try {
-      const candidateContract = loadContract(candidateConfigPath);
-      validateContractFiles(candidateContract, candidateRoot);
+      const candidateContract = loadContract(candidateConfig.path);
+      validateContractSnapshot(candidateContract, candidateRoot);
       return [];
     } catch {
       return [violation("trusted-contract-config-invalid", CONTRACT_PATH, "Bootstrap contract is invalid.")];
     }
   }
 
-  if (!candidateConfigPath) {
+  if (candidateConfig.kind === "missing") {
     return [violation("trusted-contract-config-removed", CONTRACT_PATH, "Trusted contract was removed.")];
   }
 
   try {
-    const baseContract = loadContract(baseConfigPath);
-    const candidateContract = loadContract(candidateConfigPath);
-    validateContractFiles(baseContract, baseRoot!);
-    validateContractFiles(candidateContract, candidateRoot);
+    const baseContract = loadContract(baseConfig.path);
+    const candidateContract = loadContract(candidateConfig.path);
+    validateContractSnapshot(baseContract, baseRoot!);
+    validateContractSnapshot(candidateContract, candidateRoot);
+    validateExecutionArguments(baseContract, baseRoot!, candidateRoot);
 
     const violations: TrustedContractViolation[] = [];
     validateContractEvolution(baseContract, candidateContract, candidateRoot, violations);
@@ -188,22 +195,39 @@ function validateContractSchema(value: unknown): asserts value is TrustedContrac
   }
 }
 
-function validateContractFiles(contract: TrustedContract, repoRoot: string) {
+function validateContractSnapshot(contract: TrustedContract, snapshotRoot: string) {
   for (const filePath of contract.immutable_files) {
-    if (!resolveInside(repoRoot, filePath, "file", MAX_IMMUTABLE_FILE_BYTES)) {
+    if (!resolveInside(snapshotRoot, filePath, "file", MAX_IMMUTABLE_FILE_BYTES)) {
       throw new Error("immutable file unavailable");
     }
   }
   for (const check of Object.values(contract.trusted_node_checks)) {
-    if (!resolveInside(repoRoot, check.entrypoint, "file", MAX_IMMUTABLE_FILE_BYTES)) {
+    if (!resolveInside(snapshotRoot, check.entrypoint, "file", MAX_IMMUTABLE_FILE_BYTES)) {
       throw new Error("trusted entrypoint unavailable");
     }
     for (const argument of check.arguments) {
-      if (!resolveInside(repoRoot, argument.path, argument.kind, MAX_IMMUTABLE_FILE_BYTES)) {
+      // Every merged snapshot must remain self-contained because established checks
+      // are append-only and this candidate becomes the trusted base of the next PR.
+      if (!resolveInside(snapshotRoot, argument.path, argument.kind, MAX_IMMUTABLE_FILE_BYTES)) {
         throw new Error("trusted argument unavailable");
       }
     }
-    collectImmutableModuleClosure(contract, repoRoot, check.entrypoint);
+    collectImmutableModuleClosure(contract, snapshotRoot, check.entrypoint);
+  }
+}
+
+function validateExecutionArguments(
+  contract: TrustedContract,
+  baseRoot: string,
+  candidateRoot: string,
+) {
+  for (const check of Object.values(contract.trusted_node_checks)) {
+    for (const argument of check.arguments) {
+      const argumentRoot = argument.root === "base" ? baseRoot : candidateRoot;
+      if (!resolveInside(argumentRoot, argument.path, argument.kind, MAX_IMMUTABLE_FILE_BYTES)) {
+        throw new Error("trusted execution argument unavailable");
+      }
+    }
   }
 }
 
@@ -525,6 +549,36 @@ function canonicalDirectory(root: string): string | undefined {
   }
 }
 
+function resolveContractPath(root: string): ContractPathState {
+  let current = root;
+  const segments = CONTRACT_PATH.split("/");
+  for (const [index, segment] of segments.entries()) {
+    current = path.join(current, segment);
+    try {
+      const metadata = lstatSync(current);
+      if (metadata.isSymbolicLink()) return { kind: "invalid" };
+      const isLast = index === segments.length - 1;
+      if (!isLast && !metadata.isDirectory()) return { kind: "invalid" };
+      if (isLast && (!metadata.isFile() || metadata.size <= 0 || metadata.size > MAX_CONFIG_BYTES)) {
+        return { kind: "invalid" };
+      }
+    } catch (error) {
+      if (isNodeError(error) && error.code === "ENOENT") return { kind: "missing" };
+      return { kind: "invalid" };
+    }
+  }
+  try {
+    const canonicalPath = realpathSync(current);
+    const relative = path.relative(root, canonicalPath);
+    if (relative.startsWith(`..${path.sep}`) || relative === ".." || path.isAbsolute(relative)) {
+      return { kind: "invalid" };
+    }
+    return { kind: "valid", path: canonicalPath };
+  } catch {
+    return { kind: "invalid" };
+  }
+}
+
 function resolveInside(
   root: string,
   relativePath: string,
@@ -584,6 +638,10 @@ function isPlainObject(value: unknown): value is Record<string, any> {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
   const prototype = Object.getPrototypeOf(value);
   return prototype === Object.prototype || prototype === null;
+}
+
+function isNodeError(value: unknown): value is NodeJS.ErrnoException {
+  return value instanceof Error && "code" in value;
 }
 
 function stableJson(value: unknown): string {

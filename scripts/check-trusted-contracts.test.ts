@@ -299,7 +299,7 @@ if (readFileSync(process.argv[2], "utf8") !== "candidate data") process.exit(1);
     expect(result.map((item) => item.rule)).toContain("trusted-contract-check-not-staged");
   });
 
-  test("activates a staged checker without executing candidate code in the activation PR", () => {
+  test("rejects activation when the staged checker would fail in the next base", () => {
     const base = makeRepo();
     const candidate = makeRepo();
     populate(base);
@@ -308,6 +308,27 @@ if (readFileSync(process.argv[2], "utf8") !== "candidate data") process.exit(1);
     staged.immutable_files.push("scripts/future.mjs");
     write(base, "scripts/future.mjs", "process.exit(1);\n");
     write(candidate, "scripts/future.mjs", "process.exit(1);\n");
+    write(base, ".github/ci-policy-contract.json", `${JSON.stringify(staged, null, 2)}\n`);
+    const activated = structuredClone(staged);
+    activated.trusted_node_checks["future-v1"] = {
+      entrypoint: "scripts/future.mjs",
+      arguments: [],
+    };
+    write(candidate, ".github/ci-policy-contract.json", `${JSON.stringify(activated, null, 2)}\n`);
+
+    expect(runTrustedContractCheck({ baseRepoRoot: base, candidateRepoRoot: candidate }).map((item) => item.rule))
+      .toContain("trusted-contract-check-failed");
+  });
+
+  test("activates a viable staged checker using only its immutable base closure", () => {
+    const base = makeRepo();
+    const candidate = makeRepo();
+    populate(base);
+    populate(candidate);
+    const staged = structuredClone(contract()) as any;
+    staged.immutable_files.push("scripts/future.mjs");
+    write(base, "scripts/future.mjs", "process.exit(0);\n");
+    write(candidate, "scripts/future.mjs", "process.exit(0);\n");
     write(base, ".github/ci-policy-contract.json", `${JSON.stringify(staged, null, 2)}\n`);
     const activated = structuredClone(staged);
     activated.trusted_node_checks["future-v1"] = {

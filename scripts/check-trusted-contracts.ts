@@ -124,12 +124,12 @@ export function runTrustedContractCheck(options: CheckOptions): TrustedContractV
     compareImmutableFiles(baseContract, baseRoot!, candidateRoot, violations);
 
     if (violations.length === 0) {
-      runBaseChecks(baseContract, baseRoot!, candidateRoot, violations);
+      runBaseChecks(baseContract, baseRoot!, baseRoot!, candidateRoot, violations);
     }
     if (violations.length === 0) {
-      // The candidate becomes the next trusted base. Re-run the immutable base
-      // checker against that future snapshot so a merge cannot lock every later PR.
-      runBaseChecks(baseContract, candidateRoot, candidateRoot, violations);
+      // The candidate becomes the next trusted base. Use candidate's evolved check
+      // declarations, but execute only their already-immutable base module closure.
+      runBaseChecks(candidateContract, baseRoot!, candidateRoot, candidateRoot, violations);
     }
     return violations;
   } catch {
@@ -408,8 +408,9 @@ function compareImmutableFiles(
 
 function runBaseChecks(
   contract: TrustedContract,
-  baseRoot: string,
-  candidateRoot: string,
+  programRoot: string,
+  baseInputRoot: string,
+  candidateInputRoot: string,
   violations: TrustedContractViolation[],
 ) {
   const trustedNodeExecutable = resolveTrustedNodeExecutable();
@@ -427,7 +428,7 @@ function runBaseChecks(
     let isolatedRoot: string | undefined;
     let entrypoint: string | undefined;
     try {
-      isolatedRoot = stageTrustedModuleClosure(contract, baseRoot, check.entrypoint);
+      isolatedRoot = stageTrustedModuleClosure(contract, programRoot, check.entrypoint);
       entrypoint = resolveInside(
         path.join(isolatedRoot, "program"),
         check.entrypoint,
@@ -446,7 +447,7 @@ function runBaseChecks(
     let valid = true;
     try {
       for (const argument of check.arguments) {
-        const argumentRoot = argument.root === "base" ? baseRoot : candidateRoot;
+        const argumentRoot = argument.root === "base" ? baseInputRoot : candidateInputRoot;
         const resolved = resolveInside(argumentRoot, argument.path, argument.kind, MAX_IMMUTABLE_FILE_BYTES);
         if (!resolved) {
           valid = false;

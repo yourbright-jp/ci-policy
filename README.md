@@ -99,8 +99,9 @@ import、require、code-loading builtin、percent/query/fragmentを含むURL型s
 実行するため、未列挙のbase fileや `package.json` は実行意味に影響できません。宣言済みargumentも
 base/candidate checkoutからdisjointな隔離input treeへ排他的に複製して、その複製pathだけをcheckerへ渡します。
 各argumentは現在の実行では宣言した `root` から解決し、candidate snapshot内にも全件が存在することを必須にします。
-さらに同じimmutable base checkerを `(base, candidate)` に加えて `(candidate, candidate)` でも実行し、merge後に
-candidateが次のtrusted baseになっても同じ契約が自己完結して成功することをmerge前に確認します。
+さらに既存checkを `(base, candidate)` で実行した後、既存checkと今回有効化するcheckを `(candidate, candidate)`
+でも実行します。後者もすでにimmutableなbase module closureだけを使い、merge後にcandidateが次のtrusted baseへ
+なっても発展後の契約が自己完結して成功することをmerge前に確認します。
 checkerはBunや別Nodeで直接実行せず、exact Node 26.8.1が確認できなければfail closedにします。
 Node 26.8.1の[Permission Model](https://nodejs.org/api/permissions.html)をenforce modeで使い、`--allow-net`を
 付けずnetworkを既定拒否し、隔離tree以外のfilesystem read、全filesystem write、child process、worker、
@@ -115,6 +116,7 @@ reviewしてからsource workflow rulesetを有効化します。
 新checkerは2段階で有効化します。最初のPRでは実装と依存closureをimmutable fileとして追加し、
 次のPRでtrusted checkを追加します。entrypointとlocal dependency closureの全体がすでにbaseで
 immutableでなければactivationは失敗し、activation PRでもcandidate codeは実行しません。
+すでにbaseでimmutable化済みの新checkerがcandidate自身を検査して失敗する場合もactivationを拒否します。
 
 初回 bootstrap PR は必ず人手で内容を確認し、merge後にrulesetを有効化します。中央source
 workflowはbase契約がない対象をfail closedにするため、bootstrap前に有効化してはいけません。

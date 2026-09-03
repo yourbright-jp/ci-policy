@@ -75,6 +75,43 @@ describe("runTrustedContractCheck", () => {
     expect(runTrustedContractCheck({ baseRepoRoot: base, candidateRepoRoot: candidate })).toEqual([]);
   });
 
+  test("denies network access in the actual trusted checker child", () => {
+    const base = makeRepo();
+    const candidate = makeRepo();
+    populate(base);
+    populate(candidate);
+    const checker = `import net from "node:net";
+const error = await new Promise((resolve) => {
+  let socket;
+  const timer = setTimeout(() => resolve(new Error("network probe timed out")), 2000);
+  try {
+    socket = net.connect({ host: "127.0.0.1", port: 45678 });
+  } catch (caught) {
+    clearTimeout(timer);
+    resolve(caught);
+    return;
+  }
+  socket.once("connect", () => {
+    clearTimeout(timer);
+    socket.destroy();
+    resolve(new Error("network probe connected"));
+  });
+  socket.once("error", (caught) => {
+    clearTimeout(timer);
+    resolve(caught);
+  });
+});
+const denied = error?.code === "ERR_ACCESS_DENIED"
+  || error?.cause?.code === "ERR_ACCESS_DENIED"
+  || error?.errno?.code === "ERR_ACCESS_DENIED";
+if (!denied) process.exit(1);
+`;
+    write(base, "scripts/verify.mjs", checker);
+    write(candidate, "scripts/verify.mjs", checker);
+
+    expect(runTrustedContractCheck({ baseRepoRoot: base, candidateRepoRoot: candidate })).toEqual([]);
+  });
+
   test("fails closed instead of running checks through a non-Node runtime", () => {
     const base = makeRepo();
     const candidate = makeRepo();

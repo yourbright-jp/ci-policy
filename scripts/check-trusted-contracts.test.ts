@@ -215,6 +215,48 @@ describe("runTrustedContractCheck", () => {
     }
   });
 
+  test("rejects js entrypoints and code-loading capabilities", () => {
+    const jsCandidate = makeRepo();
+    populate(jsCandidate);
+    const jsContract = structuredClone(contract()) as any;
+    jsContract.immutable_files = ["scripts/verify.js"];
+    jsContract.trusted_node_checks["candidate-data-v1"].entrypoint = "scripts/verify.js";
+    write(jsCandidate, "scripts/verify.js", "process.exit(0);\n");
+    write(jsCandidate, ".github/ci-policy-contract.json", `${JSON.stringify(jsContract, null, 2)}\n`);
+    expect(runTrustedContractCheck({ candidateRepoRoot: jsCandidate }).map((item) => item.rule))
+      .toEqual(["trusted-contract-config-invalid"]);
+
+    for (const source of [
+      'import { createRequire } from "node:module"; createRequire(import.meta.url)("./mutable.cjs");\n',
+      'const load = process.getBuiltinModule; load("module");\n',
+      'eval("process.exit(0)");\n',
+      'new Function("process.exit(0)")();\n',
+    ]) {
+      const candidate = makeRepo();
+      populate(candidate);
+      write(candidate, "scripts/verify.mjs", source);
+      expect(runTrustedContractCheck({ candidateRepoRoot: candidate }).map((item) => item.rule))
+        .toEqual(["trusted-contract-config-invalid"]);
+    }
+  });
+
+  test("executes a trusted checker from an isolated immutable closure", () => {
+    const base = makeRepo();
+    const candidate = makeRepo();
+    populate(base);
+    populate(candidate);
+    const checker = `import { readFileSync } from "node:fs";
+if (readFileSync(new URL("./mutable.txt", import.meta.url), "utf8") !== "safe") process.exit(1);
+`;
+    write(base, "scripts/verify.mjs", checker);
+    write(candidate, "scripts/verify.mjs", checker);
+    write(base, "scripts/mutable.txt", "safe");
+    write(candidate, "scripts/mutable.txt", "safe");
+
+    const result = runTrustedContractCheck({ baseRepoRoot: base, candidateRepoRoot: candidate });
+    expect(result.map((item) => item.rule)).toContain("trusted-contract-check-failed");
+  });
+
   test("required mode fails when the trusted base contract is absent", () => {
     const base = makeRepo();
     const candidate = makeRepo();

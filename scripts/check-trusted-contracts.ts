@@ -1,11 +1,16 @@
 import { spawnSync } from "node:child_process";
 import { parse } from "acorn";
 import {
+  copyFileSync,
   existsSync,
   lstatSync,
+  mkdirSync,
+  mkdtempSync,
   readFileSync,
   realpathSync,
+  rmSync,
 } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 
 export type TrustedContractViolation = {
@@ -50,6 +55,23 @@ const MAX_TRUSTED_CHECKS = 8;
 const MAX_CHECK_ARGUMENTS = 16;
 const CHECK_TIMEOUT_MS = 30_000;
 const CHECK_ID = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
+const FORBIDDEN_NODE_IMPORTS = new Set([
+  "node:child_process",
+  "node:cluster",
+  "node:module",
+  "node:repl",
+  "node:vm",
+  "node:worker_threads",
+]);
+const FORBIDDEN_DYNAMIC_CALLEES = new Set([
+  "AsyncFunction",
+  "Function",
+  "GeneratorFunction",
+  "eval",
+  "getBuiltinModule",
+  "dlopen",
+  "require",
+]);
 
 export function runTrustedContractCheck(options: CheckOptions): TrustedContractViolation[] {
   const candidateRoot = canonicalDirectory(options.candidateRepoRoot);
@@ -133,7 +155,7 @@ function validateContractSchema(value: unknown): asserts value is TrustedContrac
       throw new Error("invalid trusted check");
     }
     assertSafeRelativePath(checkValue.entrypoint, false);
-    if (!checkValue.entrypoint.endsWith(".mjs") && !checkValue.entrypoint.endsWith(".js")) {
+    if (!checkValue.entrypoint.endsWith(".mjs")) {
       throw new Error("invalid trusted check entrypoint");
     }
     if (!immutableFiles.includes(checkValue.entrypoint)) {
@@ -193,7 +215,12 @@ function collectImmutableModuleClosure(
     if (hasUtf8Bom(bytes)) throw new Error("trusted module BOM is forbidden");
     const source = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
     for (const specifier of parseStaticModuleSpecifiers(source)) {
-      if (specifier.startsWith("node:")) continue;
+      if (specifier.startsWith("node:")) {
+        if (FORBIDDEN_NODE_IMPORTS.has(specifier)) {
+          throw new Error("trusted module code-loading builtin is forbidden");
+        }
+        continue;
+      }
       if (!specifier.startsWith("./") && !specifier.startsWith("../")) {
         throw new Error("trusted module package imports are forbidden");
       }
@@ -202,8 +229,8 @@ function collectImmutableModuleClosure(
       }
       const dependencyPath = path.posix.normalize(path.posix.join(path.posix.dirname(modulePath), specifier));
       assertSafeRelativePath(dependencyPath, false);
-      if (!dependencyPath.endsWith(".mjs") && !dependencyPath.endsWith(".js")) {
-        throw new Error("trusted module imports must include an extension");
+      if (!dependencyPath.endsWith(".mjs")) {
+        throw new Error("trusted module imports must use the mjs extension");
       }
       visit(dependencyPath);
     }
@@ -236,10 +263,13 @@ function parseStaticModuleSpecifiers(source: string): string[] {
     if (value.type === "ImportExpression") {
       throw new Error("dynamic trusted module loading is forbidden");
     }
-    if (value.type === "CallExpression"
-      && isAstNode(value.callee)
-      && value.callee.type === "Identifier"
-      && value.callee.name === "require") {
+    if (value.type === "Identifier"
+      && typeof value.name === "string"
+      && FORBIDDEN_DYNAMIC_CALLEES.has(value.name)) {
+      throw new Error("dynamic trusted module loading is forbidden");
+    }
+    if ((value.type === "CallExpression" || value.type === "NewExpression")
+      && isForbiddenDynamicCallee(value.callee)) {
       throw new Error("dynamic trusted module loading is forbidden");
     }
     if (value.type === "ImportDeclaration"
@@ -264,6 +294,23 @@ function isAstNode(value: unknown): value is AstNode {
     && typeof value === "object"
     && !Array.isArray(value)
     && typeof (value as { type?: unknown }).type === "string";
+}
+
+function isForbiddenDynamicCallee(value: unknown): boolean {
+  if (!isAstNode(value)) return false;
+  if (value.type === "Identifier" && typeof value.name === "string") {
+    return FORBIDDEN_DYNAMIC_CALLEES.has(value.name);
+  }
+  if (value.type !== "MemberExpression") return false;
+  const property = value.property;
+  if (!isAstNode(property)) return false;
+  if (!value.computed && property.type === "Identifier" && typeof property.name === "string") {
+    return FORBIDDEN_DYNAMIC_CALLEES.has(property.name);
+  }
+  if (value.computed && property.type === "Literal" && typeof property.value === "string") {
+    return FORBIDDEN_DYNAMIC_CALLEES.has(property.value);
+  }
+  return false;
 }
 
 function validateContractEvolution(
@@ -328,8 +375,16 @@ function runBaseChecks(
   violations: TrustedContractViolation[],
 ) {
   for (const [checkId, check] of Object.entries(contract.trusted_node_checks)) {
-    const entrypoint = resolveInside(baseRoot, check.entrypoint, "file", MAX_IMMUTABLE_FILE_BYTES);
-    if (!entrypoint) {
+    let isolatedRoot: string | undefined;
+    let entrypoint: string | undefined;
+    try {
+      isolatedRoot = stageTrustedModuleClosure(contract, baseRoot, check.entrypoint);
+      entrypoint = resolveInside(isolatedRoot, check.entrypoint, "file", MAX_IMMUTABLE_FILE_BYTES);
+    } catch {
+      entrypoint = undefined;
+    }
+    if (!isolatedRoot || !entrypoint) {
+      if (isolatedRoot) rmSync(isolatedRoot, { force: true, recursive: true });
       violations.push(violation("trusted-contract-check-unavailable", CONTRACT_PATH, "A trusted check is unavailable."));
       continue;
     }
@@ -345,24 +400,51 @@ function runBaseChecks(
       args.push(resolved);
     }
     if (!valid) {
+      rmSync(isolatedRoot, { force: true, recursive: true });
       violations.push(violation("trusted-contract-check-input-invalid", CONTRACT_PATH, "A trusted check input is unavailable."));
       continue;
     }
 
-    const result = spawnSync(process.execPath, [entrypoint, ...args], {
-      cwd: baseRoot,
-      encoding: "utf8",
-      env: restrictedEnvironment(),
-      maxBuffer: 64 * 1024,
-      stdio: "ignore",
-      timeout: CHECK_TIMEOUT_MS,
-      windowsHide: true,
-    });
-    if (result.error || result.signal || result.status !== 0) {
-      violations.push(
-        violation("trusted-contract-check-failed", CONTRACT_PATH, `Trusted check ${checkId} failed.`),
-      );
+    try {
+      const result = spawnSync(process.execPath, [entrypoint, ...args], {
+        cwd: isolatedRoot,
+        encoding: "utf8",
+        env: restrictedEnvironment(),
+        maxBuffer: 64 * 1024,
+        stdio: "ignore",
+        timeout: CHECK_TIMEOUT_MS,
+        windowsHide: true,
+      });
+      if (result.error || result.signal || result.status !== 0) {
+        violations.push(
+          violation("trusted-contract-check-failed", CONTRACT_PATH, `Trusted check ${checkId} failed.`),
+        );
+      }
+    } finally {
+      rmSync(isolatedRoot, { force: true, recursive: true });
     }
+  }
+}
+
+function stageTrustedModuleClosure(
+  contract: TrustedContract,
+  baseRoot: string,
+  entrypoint: string,
+): string {
+  const isolatedRoot = mkdtempSync(path.join(tmpdir(), "ci-policy-trusted-"));
+  try {
+    const closure = collectImmutableModuleClosure(contract, baseRoot, entrypoint);
+    for (const modulePath of closure) {
+      const source = resolveInside(baseRoot, modulePath, "file", MAX_IMMUTABLE_FILE_BYTES);
+      if (!source) throw new Error("trusted module dependency is unavailable");
+      const destination = path.join(isolatedRoot, ...modulePath.split("/"));
+      mkdirSync(path.dirname(destination), { recursive: true });
+      copyFileSync(source, destination);
+    }
+    return isolatedRoot;
+  } catch (error) {
+    rmSync(isolatedRoot, { force: true, recursive: true });
+    throw error;
   }
 }
 

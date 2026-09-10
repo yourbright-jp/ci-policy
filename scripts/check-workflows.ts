@@ -52,8 +52,8 @@ const ALLOWED_USES = [
   /^actions\/upload-artifact@v[45]$/,
   /^oven-sh\/setup-bun@v2$/,
   /^github\/codeql-action\/[^@\s]+@v\d+$/,
-  /^yourbright-jp\/ci-policy\/\.github\/workflows\/required-policy\.yml@v[23456]$/,
-  /^yourbright-jp\/ci-policy\/\.github\/workflows\/coverage-policy\.yml@v[23456]$/,
+  /^yourbright-jp\/ci-policy\/\.github\/workflows\/required-policy\.yml@v[234567]$/,
+  /^yourbright-jp\/ci-policy\/\.github\/workflows\/coverage-policy\.yml@v[234567]$/,
 ];
 
 const DEPLOY_COMMANDS = [

@@ -10,7 +10,7 @@ on:
       policy-ref:
         description: ci-policy self-test ref. Ignored for caller repositories.
         required: false
-        default: v6
+        default: v7
         type: string
 
 permissions:
@@ -70,7 +70,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           repository: yourbright-jp/ci-policy
-          ref: ${{ github.repository == 'yourbright-jp/ci-policy' && inputs.policy-ref || 'v6' }}
+          ref: ${{ github.repository == 'yourbright-jp/ci-policy' && inputs.policy-ref || 'v7' }}
           path: ci-policy
           persist-credentials: false
 

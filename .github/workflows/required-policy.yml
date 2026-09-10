@@ -23,15 +23,26 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
+    env:
+      # PR/push は required-check 用の成功だけ返す。本体は nightly / dispatch。
+      # ci-policy 自身の PR では従来どおりフル実行する。
+      FULL_POLICY: ${{ github.repository == 'yourbright-jp/ci-policy' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
     steps:
+      - name: Defer PR/push policy to nightly
+        if: env.FULL_POLICY != 'true'
+        run: |
+          echo "Full policy deferred to nightly (03:00 JST) or workflow_dispatch."
+          echo "event=${{ github.event_name }} repo=${{ github.repository }}"
+
       - name: Checkout target repository
+        if: env.FULL_POLICY == 'true'
         uses: actions/checkout@v6
         with:
           path: target
           persist-credentials: false
 
       - name: Checkout pull request base
-        if: github.event_name == 'pull_request'
+        if: env.FULL_POLICY == 'true' && github.event_name == 'pull_request'
         uses: actions/checkout@v6
         with:
           ref: ${{ github.event.pull_request.base.sha }}
@@ -39,7 +50,7 @@ jobs:
           persist-credentials: false
 
       - name: Checkout merge group base
-        if: github.event_name == 'merge_group'
+        if: env.FULL_POLICY == 'true' && github.event_name == 'merge_group'
         uses: actions/checkout@v6
         with:
           ref: ${{ github.event.merge_group.base_sha }}
@@ -47,7 +58,7 @@ jobs:
           persist-credentials: false
 
       - name: Checkout push parent
-        if: github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000'
+        if: env.FULL_POLICY == 'true' && github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000'
         uses: actions/checkout@v6
         with:
           ref: ${{ github.event.before }}
@@ -55,6 +66,7 @@ jobs:
           persist-credentials: false
 
       - name: Checkout policy repository
+        if: env.FULL_POLICY == 'true'
         uses: actions/checkout@v6
         with:
           repository: yourbright-jp/ci-policy
@@ -63,21 +75,23 @@ jobs:
           persist-credentials: false
 
       - name: Setup trusted Node runtime
+        if: env.FULL_POLICY == 'true'
         uses: actions/setup-node@v6
         with:
           node-version: 26.8.1
 
       - name: Verify trusted Node network denial
+        if: env.FULL_POLICY == 'true'
         run: node --permission ci-policy/scripts/assert-node-network-denied.mjs
 
       - name: Setup Bun for policy self-test
-        if: github.repository == 'yourbright-jp/ci-policy'
+        if: env.FULL_POLICY == 'true' && github.repository == 'yourbright-jp/ci-policy'
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
           bun-version: 1.3.3
 
       - name: Verify policy distribution
-        if: github.repository == 'yourbright-jp/ci-policy'
+        if: env.FULL_POLICY == 'true' && github.repository == 'yourbright-jp/ci-policy'
         working-directory: ci-policy
         run: |
           bun install --frozen-lockfile
@@ -86,17 +100,22 @@ jobs:
           git diff --exit-code -- dist
 
       - name: Validate pull request body
-        if: github.event_name == 'pull_request'
+        if: env.FULL_POLICY == 'true' && github.event_name == 'pull_request'
         env:
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
           PR_BODY: ${{ github.event.pull_request.body }}
         run: node ci-policy/dist/check-pr-body.mjs
 
       - name: Run policy checks
+        if: env.FULL_POLICY == 'true'
         env:
           TARGET_REPOSITORY: ${{ inputs.repository || github.repository }}
-        run: >-
-          node ci-policy/dist/check-workflows.mjs
-          --repo "$GITHUB_WORKSPACE/target"
-          --base-repo "$GITHUB_WORKSPACE/target-base"
-          --repository "$TARGET_REPOSITORY"
+        run: |
+          extra=()
+          if [ -d "$GITHUB_WORKSPACE/target-base" ]; then
+            extra+=(--base-repo "$GITHUB_WORKSPACE/target-base")
+          fi
+          node ci-policy/dist/check-workflows.mjs \
+            --repo "$GITHUB_WORKSPACE/target" \
+            "${extra[@]}" \
+            --repository "$TARGET_REPOSITORY"

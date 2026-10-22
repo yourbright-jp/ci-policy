@@ -1,8 +1,10 @@
 # Bun execution boundary migration
 
-The current security release retains patched Node 26.12.1 for trusted checker
-execution. A Bun migration is a separate change and must not remove runtime
-isolation or silently fall back to an unrestricted process.
+Version 9 runs trusted checkers with Bun 1.4.3 in a digest-pinned Linux x64 OCI
+image. Unsupported hosts, a missing prepared image, or a failed boundary probe
+fail closed. There is no Node or unrestricted-process fallback. The legacy
+`trusted_node_checks` contract key remains unchanged to preserve immutable
+contract evolution and the existing caller data format.
 
 ## Required boundary
 
@@ -19,20 +21,32 @@ isolation or silently fall back to an unrestricted process.
 - Bound wall time, CPU, memory, output, and process/thread resources. Terminate
   and remove the sandbox even when its supervising process times out.
 
-## Proposed execution mechanism
+## Execution mechanism
 
 Use a Linux OCI container on a runner with a supported container engine, with
 an immutable Bun image digest, a read-only filesystem, an isolated network
 namespace, no capabilities, no-new-privileges, an explicit non-root user, and
 read-only bind mounts for the staged program/input trees. The image must have
-the required upstream security fixes; a version number alone is insufficient.
+an independently reviewed runtime and no reachable vulnerable decoder path.
+Brotli remains linked in Bun, but a checker cannot create any socket, including
+loopback, DNS, UDP or Unix sockets. The static module allowlist excludes zlib,
+FFI and runtime loading; Bun, Worker and WebAssembly globals are also rejected.
+This is an execution-path mitigation, not a claim that the library was patched.
 
-Network namespace isolation alone still permits loopback. A reviewed seccomp
-profile must deny socket creation/connection and process creation while allowing
-the Bun runtime's required threads. The profile must distinguish thread creation
-from process creation and fail closed if the host cannot enforce it. The initial
-runtime launch and runtime initialization require an explicit, tested design;
-do not claim a generic Docker invocation enforces every requirement above.
+Network namespace isolation alone still permits loopback. The seccomp allowlist
+does not allow socket, connect, fork, vfork, mounts, namespace changes, ptrace or
+io_uring. clone3 returns ENOSYS so glibc uses clone, which is allowed only with
+CLONE_THREAD and without namespace/vfork flags. Bun's required engine threads
+can initialize; another process cannot start. execve permits the initial runtime
+launch but cannot create an additional process.
+
+Before loading a checker, a fixed preload calls libc socket for Unix, IPv4, IPv6
+and UDP and fork, requiring kernel EPERM. This avoids trusting Bun's translated
+network errors: node:net can report ECONNREFUSED for a denied socket syscall.
+After this fixed probe, all exported FFI functions, Worker constructors and Bun
+spawn functions are sealed off. --no-addons blocks Node native addons; it is not
+treated as an FFI switch. --disallow-code-generation-from-strings=strict rejects
+string-generated code. Static module validation remains an independent layer.
 
 Do not expose the Docker API to checker code. The trusted supervisor, outside
 the sandbox, creates and destroys a uniquely named container. Resolve and verify
@@ -51,3 +65,12 @@ and the existing contract evolution/module-closure regression suite.
 The runner must support the isolation mechanism. Moving from a slim container
 runner to a full VM is an explicit workflow change, with its own CI validation.
 No security probe may be removed merely to make Bun compatibility tests pass.
+
+The supervisor is outside the checker container. Only the staged program/input
+tree is bind-mounted, read-only. The image contains public runtime files, not
+host files or credentials. Containers run as UID/GID 65532 with no capabilities,
+no-new-privileges, 512 MiB memory, one CPU, 64 PIDs/threads and bounded descriptors.
+Output is limited to 64 KiB and is not copied into candidate-check failure logs.
+The wall limit is 30 seconds. The supervisor kills a timed-out Docker client with
+SIGKILL, forcibly removes its uniquely named container, then verifies absence.
+Killing only the client or forwarding SIGTERM is not sufficient cleanup.

@@ -61,12 +61,12 @@ GitHub Actions workflow から次の token 名を参照することを禁止し�
 - `actions/upload-artifact@v4` / `@v5`
 - `oven-sh/setup-bun@v2`
 - `github/codeql-action/*@v*`
-- `yourbright-jp/ci-policy/.github/workflows/required-policy.yml@v3` / `@v4` / `@v5` / `@v6`
-- `yourbright-jp/ci-policy/.github/workflows/coverage-policy.yml@v3` / `@v4` / `@v5` / `@v6`
+- `yourbright-jp/ci-policy/.github/workflows/required-policy.yml@v2`〜`@v9`（新規導入は`@v9`）
+- `yourbright-jp/ci-policy/.github/workflows/coverage-policy.yml@v2`〜`@v9`（新規導入は`@v9`）
 
 ## candidate が同じ PR で guardrail を弱めない
 
-v6 は pull request / merge group / main push の base を別 checkout し、対象 repo の
+v9 はfull検査時にpull request / merge group / main pushのbaseを別checkoutし、対象repoの
 `.github/ci-policy-exceptions.yaml` は base 版だけを信頼します。candidate が追加・延長した
 例外は、その PR 自身の検査には適用しません。
 
@@ -83,9 +83,10 @@ v6 は pull request / merge group / main push の base を別 checkout し、対
 - 引数はprogram treeとdisjointな隔離input treeへ排他的に複製し、重複・case aliasを拒否する
 - 現在の実行では引数を宣言どおりbase/candidateから解決し、candidate snapshotにも全引数を保持して次のbaseとして自己完結させる
 - 既存checkを `(base, candidate)`、既存checkと今回有効化するcheckを `(candidate, candidate)` で成功させる。どちらもbaseでimmutable化済みのmodule closureだけを実行し、merge後の恒久lockoutを防ぐ
-- checkerはBunや別Nodeで直接実行せず、exact Node 26.12.1を確認できなければfail closedにする
-- Node 26.12.1 Permission Modelをenforce modeで使い、`--allow-net`なしのnetwork既定拒否と、隔離tree以外のread、write、process、worker、addon、WASI拒否を行い、workflowでexact versionとnet/http/fetch/DNS/UDPの実拒否を先に検証する
-- Permission Modelはreview済みbase checkerのblast radiusを抑えるseat beltであり、candidate codeのsandboxとは扱わない
+- checkerはdigest固定Bun 1.4.3のLinux x64 OCI sandbox内でだけ実行し、準備済みイメージ・隔離機構がなければfail closedにする
+- 非root・read-only mount・network namespace・seccomp allowlistでホスト読取、write、network、process creationを制限し、socket/forkのkernel EPERMを毎回起動時に確認する
+- 起動時の固定probe後にFFIとWorker APIを無効化し、strict code generation拒否・既存module closure検査・resource制限・timeout時のcontainer削除を維持する
+- workflowで正規読取、通信、write、process、worker、FFI、code generation、timeout cleanupの受入試験を先に検証する。詳細は`docs/bun-sandbox-migration.md`を参照する
 - candidate dataをcodeとして評価しないことは、base checkerをimmutable化するbootstrap reviewの必須確認項目とする
 - 新checkerは実装と全local dependency closureをimmutable化するPRとcheckを追加するPRの2段階で有効化し、どちらもcandidate側checker/moduleを実行しない
 - 初回bootstrap契約は `trusted_node_checks = {}` だけを許可し、active checkを同梱させない

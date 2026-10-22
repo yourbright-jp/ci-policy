@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { runTrustedBunSandbox, trustedSandboxAvailable, TRUSTED_BUN_VERSION } from "./trusted-bun-sandbox";
 import { parse } from "acorn";
 import {
   constants as fsConstants,
@@ -59,7 +59,6 @@ const MAX_IMMUTABLE_FILES = 64;
 const MAX_TRUSTED_CHECKS = 8;
 const MAX_CHECK_ARGUMENTS = 16;
 const CHECK_TIMEOUT_MS = 30_000;
-const TRUSTED_NODE_VERSION = "26.12.1";
 const CHECK_ID = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
 const ALLOWED_NODE_IMPORTS = new Set([
   "node:crypto",
@@ -87,7 +86,7 @@ const FORBIDDEN_DYNAMIC_CALLEES = new Set([
   "runInNewContext",
   "runInThisContext",
 ]);
-const FORBIDDEN_GLOBAL_IDENTIFIERS = new Set(["WebAssembly", "global", "globalThis"]);
+const FORBIDDEN_GLOBAL_IDENTIFIERS = new Set(["Bun", "Worker", "ShadowRealm", "WebAssembly", "global", "globalThis"]);
 const ALLOWED_PROCESS_PROPERTIES = new Set(["argv", "env", "exit", "exitCode"]);
 
 export function runTrustedContractCheck(options: CheckOptions): TrustedContractViolation[] {
@@ -454,13 +453,12 @@ function runBaseChecks(
   candidateInputRoot: string,
   violations: TrustedContractViolation[],
 ) {
-  const trustedNodeExecutable = resolveTrustedNodeExecutable();
-  if (!trustedNodeExecutable) {
+  if (!trustedSandboxAvailable()) {
     violations.push(
       violation(
         "trusted-contract-runtime-invalid",
         CONTRACT_PATH,
-        `Trusted checks require Node ${TRUSTED_NODE_VERSION}.`,
+        `Trusted checks require Bun ${TRUSTED_BUN_VERSION} and the prepared Linux sandbox.`,
       ),
     );
     return;
@@ -514,23 +512,7 @@ function runBaseChecks(
     }
 
     try {
-      const childArguments = [
-        "--permission",
-        "--disallow-code-generation-from-strings",
-        `--allow-fs-read=${isolatedRoot}`,
-        entrypoint,
-        ...args,
-      ];
-      const result = spawnSync(trustedNodeExecutable, childArguments, {
-        cwd: isolatedRoot,
-        encoding: "utf8",
-        env: restrictedEnvironment(),
-        maxBuffer: 64 * 1024,
-        stdio: "ignore",
-        timeout: CHECK_TIMEOUT_MS,
-        windowsHide: true,
-      });
-      if (result.error || result.signal || result.status !== 0) {
+      if (!runTrustedBunSandbox(isolatedRoot, entrypoint, args, CHECK_TIMEOUT_MS)) {
         violations.push(
           violation("trusted-contract-check-failed", CONTRACT_PATH, `Trusted check ${checkId} failed.`),
         );
@@ -538,26 +520,6 @@ function runBaseChecks(
     } finally {
       rmSync(isolatedRoot, { force: true, recursive: true });
     }
-  }
-}
-
-function resolveTrustedNodeExecutable(): string | undefined {
-  const executable = process.versions.bun
-    ? process.env.CI_POLICY_TRUSTED_NODE ?? "node"
-    : process.execPath;
-  try {
-    const probe = spawnSync(executable, ["--version"], {
-      encoding: "utf8",
-      env: restrictedEnvironment(),
-      maxBuffer: 1024,
-      stdio: ["ignore", "pipe", "ignore"],
-      timeout: 5_000,
-      windowsHide: true,
-    });
-    if (probe.error || probe.signal || probe.status !== 0) return undefined;
-    return probe.stdout.trim() === `v${TRUSTED_NODE_VERSION}` ? executable : undefined;
-  } catch {
-    return undefined;
   }
 }
 
@@ -581,15 +543,6 @@ function stageTrustedModuleClosure(
     rmSync(isolatedRoot, { force: true, recursive: true });
     throw error;
   }
-}
-
-function restrictedEnvironment(): NodeJS.ProcessEnv {
-  const permitted = ["PATH", "Path", "PATHEXT", "SYSTEMROOT", "WINDIR", "TMP", "TEMP", "TMPDIR", "LANG", "LC_ALL"];
-  const env: NodeJS.ProcessEnv = { CI: "true" };
-  for (const key of permitted) {
-    if (process.env[key] !== undefined) env[key] = process.env[key];
-  }
-  return env;
 }
 
 function canonicalDirectory(root: string): string | undefined {

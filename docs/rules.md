@@ -83,8 +83,8 @@ v6 は pull request / merge group / main push の base を別 checkout し、対
 - 引数はprogram treeとdisjointな隔離input treeへ排他的に複製し、重複・case aliasを拒否する
 - 現在の実行では引数を宣言どおりbase/candidateから解決し、candidate snapshotにも全引数を保持して次のbaseとして自己完結させる
 - 既存checkを `(base, candidate)`、既存checkと今回有効化するcheckを `(candidate, candidate)` で成功させる。どちらもbaseでimmutable化済みのmodule closureだけを実行し、merge後の恒久lockoutを防ぐ
-- checkerはBunや別Nodeで直接実行せず、exact Node 26.8.1を確認できなければfail closedにする
-- Node 26.8.1 Permission Modelをenforce modeで使い、`--allow-net`なしのnetwork既定拒否と、隔離tree以外のread、write、process、worker、addon、WASI拒否を行い、workflowでexact versionとnet/http/fetch/DNS/UDPの実拒否を先に検証する
+- checkerはBunや別Nodeで直接実行せず、exact Node 26.12.1を確認できなければfail closedにする
+- Node 26.12.1 Permission Modelをenforce modeで使い、`--allow-net`なしのnetwork既定拒否と、隔離tree以外のread、write、process、worker、addon、WASI拒否を行い、workflowでexact versionとnet/http/fetch/DNS/UDPの実拒否を先に検証する
 - Permission Modelはreview済みbase checkerのblast radiusを抑えるseat beltであり、candidate codeのsandboxとは扱わない
 - candidate dataをcodeとして評価しないことは、base checkerをimmutable化するbootstrap reviewの必須確認項目とする
 - 新checkerは実装と全local dependency closureをimmutable化するPRとcheckを追加するPRの2段階で有効化し、どちらもcandidate側checker/moduleを実行しない

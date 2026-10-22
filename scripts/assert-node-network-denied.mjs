@@ -3,7 +3,7 @@ import { createSocket } from "node:dgram";
 import http from "node:http";
 import net from "node:net";
 
-const EXPECTED_NODE_VERSION = "26.8.1";
+const EXPECTED_NODE_VERSION = "26.12.1";
 const TIMEOUT_MS = 2_000;
 const PROBE_PORT = 45_678;
 

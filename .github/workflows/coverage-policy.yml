@@ -61,7 +61,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           repository: yourbright-jp/ci-policy
-          ref: v6
+          ref: v8
           path: ci-policy
           persist-credentials: false
 

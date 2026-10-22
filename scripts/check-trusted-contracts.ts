@@ -59,7 +59,7 @@ const MAX_IMMUTABLE_FILES = 64;
 const MAX_TRUSTED_CHECKS = 8;
 const MAX_CHECK_ARGUMENTS = 16;
 const CHECK_TIMEOUT_MS = 30_000;
-const TRUSTED_NODE_VERSION = "26.8.1";
+const TRUSTED_NODE_VERSION = "26.12.1";
 const CHECK_ID = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
 const ALLOWED_NODE_IMPORTS = new Set([
   "node:crypto",

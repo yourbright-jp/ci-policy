@@ -106,8 +106,8 @@ base/candidate checkoutからdisjointな隔離input treeへ排他的に複製し
 さらに既存checkを `(base, candidate)` で実行した後、既存checkと今回有効化するcheckを `(candidate, candidate)`
 でも実行します。後者もすでにimmutableなbase module closureだけを使い、merge後にcandidateが次のtrusted baseへ
 なっても発展後の契約が自己完結して成功することをmerge前に確認します。
-checkerはBunや別Nodeで直接実行せず、exact Node 26.8.1が確認できなければfail closedにします。
-Node 26.8.1の[Permission Model](https://nodejs.org/api/permissions.html)をenforce modeで使い、`--allow-net`を
+checkerはBunや別Nodeで直接実行せず、exact Node 26.12.1が確認できなければfail closedにします。
+Node 26.12.1の[Permission Model](https://nodejs.org/api/permissions.html)をenforce modeで使い、`--allow-net`を
 付けずnetworkを既定拒否し、隔離tree以外のfilesystem read、全filesystem write、child process、worker、
 native addon、WASIも許可しません。workflowはexact Node versionとnet/http/fetch/DNS/UDPの実拒否を先に検証します。
 Permission Modelはreview済みbase checkerのblast radiusを抑えるseat beltであり、candidate codeのsandboxとは扱いません。

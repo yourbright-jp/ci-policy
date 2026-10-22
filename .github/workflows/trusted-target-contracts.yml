@@ -11,7 +11,7 @@ jobs:
   trusted-contracts:
     name: trusted-contracts
     if: github.repository != 'yourbright-jp/ci-policy'
-    runs-on: ubuntu-slim
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: read
@@ -42,23 +42,25 @@ jobs:
         uses: actions/checkout@v6
         with:
           repository: yourbright-jp/ci-policy
-          ref: v8
+          ref: v9
           path: ci-policy
           persist-credentials: false
 
-      - name: Setup trusted Node runtime
-        uses: actions/setup-node@v6
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
-          node-version: 26.12.1
+          bun-version: 1.4.3
 
-      - name: Verify trusted Node network denial
-        run: node --permission ci-policy/scripts/assert-node-network-denied.mjs
+      - name: Prepare trusted Bun sandbox
+        run: |
+          docker pull oven/bun:1.4.3@sha256:ec06c3b6cea04192ae6770c434f668ca41d343ad19fa6472216c7b48be39c598
+          bun ci-policy/scripts/assert-bun-sandbox.ts
 
       - name: Run central policy checks
         env:
           TARGET_REPOSITORY: ${{ github.repository }}
         run: >-
-          node ci-policy/dist/check-workflows.mjs
+          bun ci-policy/dist/check-workflows.mjs
           --repo "$GITHUB_WORKSPACE/target"
           --base-repo "$GITHUB_WORKSPACE/target-base"
           --require-trusted-contract

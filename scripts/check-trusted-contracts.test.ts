@@ -157,9 +157,9 @@ const error = await new Promise((resolve) => {
     resolve(caught);
   });
 });
-const denied = error?.code === "ERR_ACCESS_DENIED"
-  || error?.cause?.code === "ERR_ACCESS_DENIED"
-  || error?.errno?.code === "ERR_ACCESS_DENIED";
+// The trusted preload independently requires socket/fork syscall EPERM on
+// every invocation. Bun's node:net maps that socket error to ECONNREFUSED.
+const denied = ["ERR_ACCESS_DENIED", "EPERM", "EACCES", "ECONNREFUSED"].includes(error?.code);
 if (!denied) process.exit(1);
 `;
     write(base, "scripts/verify.mjs", checker);
@@ -168,19 +168,16 @@ if (!denied) process.exit(1);
     expect(runTrustedContractCheck({ baseRepoRoot: base, candidateRepoRoot: candidate })).toEqual([]);
   });
 
-  test("fails closed instead of running checks through a non-Node runtime", () => {
+  test("rejects Bun-specific authority before executing an immutable checker", () => {
     const base = makeRepo();
     const candidate = makeRepo();
     populate(base);
     populate(candidate);
-    const previous = process.env.CI_POLICY_TRUSTED_NODE;
-    process.env.CI_POLICY_TRUSTED_NODE = process.execPath;
-    try {
-      const result = runTrustedContractCheck({ baseRepoRoot: base, candidateRepoRoot: candidate });
-      expect(result.map((item) => item.rule)).toEqual(["trusted-contract-runtime-invalid"]);
-    } finally {
-      if (previous === undefined) delete process.env.CI_POLICY_TRUSTED_NODE;
-      else process.env.CI_POLICY_TRUSTED_NODE = previous;
+    for (const checker of ["Bun.spawn(['true']);", "new Worker('x.mjs');", "import { dlopen } from 'bun:ffi';"] ) {
+      write(base, "scripts/verify.mjs", checker);
+      write(candidate, "scripts/verify.mjs", checker);
+      expect(runTrustedContractCheck({ baseRepoRoot: base, candidateRepoRoot: candidate }).map(item => item.rule))
+        .toEqual(["trusted-contract-config-invalid"]);
     }
   });
 

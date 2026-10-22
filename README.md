@@ -106,11 +106,13 @@ base/candidate checkoutからdisjointな隔離input treeへ排他的に複製し
 さらに既存checkを `(base, candidate)` で実行した後、既存checkと今回有効化するcheckを `(candidate, candidate)`
 でも実行します。後者もすでにimmutableなbase module closureだけを使い、merge後にcandidateが次のtrusted baseへ
 なっても発展後の契約が自己完結して成功することをmerge前に確認します。
-checkerはBunや別Nodeで直接実行せず、exact Node 26.12.1が確認できなければfail closedにします。
-Node 26.12.1の[Permission Model](https://nodejs.org/api/permissions.html)をenforce modeで使い、`--allow-net`を
-付けずnetworkを既定拒否し、隔離tree以外のfilesystem read、全filesystem write、child process、worker、
-native addon、WASIも許可しません。workflowはexact Node versionとnet/http/fetch/DNS/UDPの実拒否を先に検証します。
-Permission Modelはreview済みbase checkerのblast radiusを抑えるseat beltであり、candidate codeのsandboxとは扱いません。
+checkerはBun 1.4.3のdigest固定OCIイメージ内でだけ実行し、Linux x64・準備済みイメージ・隔離機構が
+利用できなければfail closedにします。Node.jsへの自動切替はありません。非root、read-only mount、
+network namespace、seccomp syscall allowlistでホスト読取・書込・通信・子プロセスを制限します。
+起動時にlibcから直接socket/forkを呼び、kernelのEPERMを確認した後でFFI APIとWorkerを無効化します。
+文字列からのcode generationはBunのstrict設定で拒否し、既存のimmutable module/引数検証も維持します。
+workflowで通信・書込・process・FFI・worker・timeout cleanupの受入試験を先に実行します。
+詳細と制約は[実行境界](docs/bun-sandbox-migration.md)を参照してください。
 
 信頼境界はbaseでreview・immutable化済みのchecker本体です。executor自身がcandidate fileをmoduleとして
 解決・import・起動することはなく、candidateは実行moduleや依存を差し替えられません。宣言済みdataの

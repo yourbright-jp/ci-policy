@@ -51,25 +51,26 @@ jobs:
   policy:
     permissions:
       contents: read
-    uses: yourbright-jp/ci-policy/.github/workflows/required-policy.yml@v6
+    uses: yourbright-jp/ci-policy/.github/workflows/required-policy.yml@v9
     with:
       repository: yourbright-jp/example-repo
 ```
 
 GitHub の ruleset では、各 repo の `policy / policy` check を required status check にします。
 
-v6 では workflow 規約と PR 本文の必須セクション (`## 概要` / `## テスト`) を同じ
-required job で検証します。検証コードはリリース済みの Node.js bundle を
-`ubuntu-slim` で実行するため、caller ごとの Bun setup / dependency install や
-PR 本文専用 job は不要です。空でない Dependabot PR 本文は見出し検証を免除します。
+v9 のfull policyではworkflow規約とPR本文の必須セクション (`## 概要` / `## テスト`) を同じ
+jobで検証します。配布済みBun bundleをDocker対応の`ubuntu-latest`で実行し、Bunと固定sandbox
+imageの準備はreusable workflowが担います。callerのPR/pushはnightlyまたはworkflow_dispatchへ
+full検査を委ねる既存動作を維持します。定期・手動のfull検査を使うcallerは、それぞれのtriggerを
+追加してください。ci-policy自身のPRはfull検査します。空でないDependabot本文は見出し検証を免除します。
 pull request / merge group / main push では base と candidate を別 checkout し、例外は
 base 版だけを読みます。同じ PR で追加した例外による自己免除はできません。
 
 ### Trusted target contract (opt-in)
 
-対象 repo の `.github/ci-policy-contract.json` が base に存在すると、v6 は candidate が
+対象 repo の `.github/ci-policy-contract.json` が base に存在すると、v9 は candidate が
 既存契約を弱めていないこと、指定ファイルの byte が変わっていないことを確認し、base
-版の Node checker だけを実行します。checker には GitHub token や secret を渡さず、出力も
+版のimmutable checkerだけをBun sandboxで実行します。checkerにはGitHub tokenやsecretを渡さず、出力も
 破棄します。中央 public repo に対象 repo 名や内部パスを置く必要はありません。
 
 ```json
@@ -143,7 +144,7 @@ jobs:
   coverage:
     permissions:
       contents: read
-    uses: yourbright-jp/ci-policy/.github/workflows/coverage-policy.yml@v6
+    uses: yourbright-jp/ci-policy/.github/workflows/coverage-policy.yml@v9
     with:
       repository: yourbright-jp/example-repo
       # 任意 override (省略時は line 60 / branch 50)

@@ -61,12 +61,12 @@ GitHub Actions workflow から次の token 名を参照することを禁止し�
 - `actions/upload-artifact@v4` / `@v5`
 - `oven-sh/setup-bun@v2`
 - `github/codeql-action/*@v*`
-- `yourbright-jp/ci-policy/.github/workflows/required-policy.yml@v3` / `@v4` / `@v5` / `@v6`
-- `yourbright-jp/ci-policy/.github/workflows/coverage-policy.yml@v3` / `@v4` / `@v5` / `@v6`
+- `yourbright-jp/ci-policy/.github/workflows/required-policy.yml@v2`〜`@v9`（新規導入は`@v9`）
+- `yourbright-jp/ci-policy/.github/workflows/coverage-policy.yml@v2`〜`@v9`（新規導入は`@v9`）
 
 ## candidate が同じ PR で guardrail を弱めない
 
-v6 は pull request / merge group / main push の base を別 checkout し、対象 repo の
+v9 はfull検査時にpull request / merge group / main pushのbaseを別checkoutし、対象repoの
 `.github/ci-policy-exceptions.yaml` は base 版だけを信頼します。candidate が追加・延長した
 例外は、その PR 自身の検査には適用しません。
 
